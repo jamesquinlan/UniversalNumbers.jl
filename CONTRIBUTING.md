@@ -34,7 +34,7 @@ This section walks through adding `CFloat{23,7}` (a 32-bit classic float with 7 
 bits and subnormals enabled) as a complete, concrete example. Every other type follows
 the same four-step pattern.
 
-### Step 1 — determine the C++ type and interface type
+### Step 1: determine the C++ type and interface type
 
 Look up or derive the C++ template instantiation for the type you want.
 
@@ -60,7 +60,7 @@ C++ block type is smaller than the total size (e.g. `hfp64` is 64 bits but uses
 **Choose a C symbol name** — the convention is `<family><nbits>_<param>`:
 - `cfloat32_7` for `CFloat{23,7}` (using nbits=32, exponent=7)
 
-### Step 2 — register on the C++ side
+### Step 2: register on the C++ side
 
 Open `src/libuniversal_wrapper.cpp` and add one line to `TYPE_REGISTRY_FULL`:
 
@@ -89,7 +89,7 @@ automatically — no other C++ changes needed.
 | `HFloat` | `sw::universal::hfloat<ndigits, es, bt>` | ndigits = hex fraction digits |
 | `DFloat` | `sw::universal::dfloat<ndigits, es, sw::universal::DecimalEncoding::BID, bt>` | encoding hardcoded to BID |
 
-### Step 3 — register on the Julia side
+### Step 3: register on the Julia side
 
 Open `src/UniversalNumbers.jl` and add one tuple to the appropriate registry constant.
 
@@ -127,7 +127,7 @@ Tuple layout: `(N, CPrefix, StorageT)`.
 
 **For `DD`** (double-double), do not use either registry — see the special-case note below.
 
-### Step 4 — rebuild and verify
+### Step 4: rebuild and verify
 
 ```bash
 # Rebuild the shared library
@@ -148,7 +148,7 @@ julia --project=. -e '
 julia --project=. test/runtests.jl
 ```
 
-### Step 5 — update documentation
+### Step 5: update documentation
 
 - **`README.md`**: add a row to the Supported types table
 - **`STATUS.md`**: add a row to the Current Registry table
