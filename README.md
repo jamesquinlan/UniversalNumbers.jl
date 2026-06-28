@@ -279,8 +279,7 @@ test/lns.jl                    LNS arithmetic tests
 test/la.jl                     Cross-family linear algebra tests
 test/printbits.jl              Bit-inspection tests
 test/broadcasting.jl           Broadcasting and array tests
-examples/chebyshev.jl          Chebyshev nodes and approximation
-examples/lorenz.jl             Lorenz attractor visualization
+examples/linalog.jl            A few examples of linear algebra
 examples/quire.jl              Quire vs naive dot product accuracy comparison
 CONTRIBUTING.md                Adding types, building from source, JLL workflow
 ```
