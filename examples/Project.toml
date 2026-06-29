@@ -1,0 +1,18 @@
+[deps]
+AlgebraicMultigrid = "2169fc97-5a83-5252-b627-83903c6c433c"
+IncompleteLU = "40713840-3770-5561-ab4c-a76e7d0d7895"
+IterativeSolvers = "42fd0dbc-a981-5370-80f2-aaf504508153"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MatrixDepot = "b51810bb-c9f3-55da-ae3c-350fc1fbce05"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+UniversalNumbers = "438cb659-dcb9-46ca-8bd1-3c7a98a84c4c"
+
+[sources]
+UniversalNumbers = {path = ".."}
+
+[compat]
+MatrixDepot = "1"
+Plots = "1"
+julia = "1.11"
