@@ -34,7 +34,7 @@ julia --version       # should print julia version 1.11.x or later
 | Tool | Minimum version | Notes |
 |---|---|---|
 | Julia | 1.10 | |
-| CMake | 3.22 | |
+| CMake | 3.20 | |
 | C++ compiler | GCC 10 / Clang 12 / MSVC 2019 | C++20 required |
 
 The Universal headers are vendored in `deps/universal/include/` — no separate

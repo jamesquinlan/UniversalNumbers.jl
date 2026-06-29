@@ -36,7 +36,7 @@ version = v"0.1.0"
 sources = [
     GitSource(
         "https://github.com/jamesquinlan/UniversalNumbers.jl.git",
-        "REPLACE_WITH_COMMIT_SHA_OF_v0.1.0",   # run: git rev-parse v0.1.0^{}
+        "9da14fe579aaf928b38af3279705574e76fec7f1",   # run: git rev-parse v0.1.0^{}
     ),
 ]
 

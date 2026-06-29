@@ -294,7 +294,7 @@ type, the JLL build, and design notes).
 library automatically via `UniversalNumbers_jll`. Prerequisites:
 
 - Julia ≥ 1.10
-- CMake ≥ 3.22
+- CMake ≥ 3.20
 - A C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 
 ```bash
