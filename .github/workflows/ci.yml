@@ -67,8 +67,8 @@ jobs:
       - name: Build shared library
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
 
-      - name: Instantiate main project
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Instantiate docs project
+        run: julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 
       - name: Build and deploy docs
         env:

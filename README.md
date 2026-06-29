@@ -1,4 +1,4 @@
-# <img src="universalnumbers.svg" width="45" height="45" align="middle"/> UniversalNumbers.jl
+# <img src="universalnumbers.svg" width="45" height="45" align="absmiddle"/> UniversalNumbers.jl
 
 [![CI](https://github.com/jamesquinlan/UniversalNumbers.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesquinlan/UniversalNumbers.jl/actions/workflows/ci.yml)
 
