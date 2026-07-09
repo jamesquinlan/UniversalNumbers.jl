@@ -127,10 +127,9 @@ const QRmod = UniversalNumbers.QR
         # R is upper triangular
         @test istriu(Matrix(F.R))
 
-        # Reconstruction: A = Q^T R in Float64
-        Rm = Float64.(Matrix(F.R))
-        recon = lmul!(adjoint(F.Q), copy(Rm))
-        @test norm(recon - Float64.(Adense)) < atol_p32
+        # Reconstruction: A = Q R
+        QR_recon = Float64.(Matrix(F.Q)) * Float64.(Matrix(F.R))   # Float64 matmul; Posit Q has no lmul!
+        @test norm(QR_recon - Float64.(Adense)) < atol_p32
     end
 
 end

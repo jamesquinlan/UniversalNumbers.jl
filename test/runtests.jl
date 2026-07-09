@@ -960,11 +960,14 @@ end
 include("broadcasting.jl")
 include("la.jl")
 include("linalg_lu.jl")
+include("linalg_qr.jl")
 include("lns.jl")
 include("math_linalg.jl")
 include("posits.jl")
 include("printbits.jl")
 include("takums.jl")
+include("rounding.jl")
+include("linalg_fallbacks.jl")
 
 # ---------------------------------------------------------------------------
 # Aqua.jl quality assurance. Aqua is a test-only dependency ([extras]), so this

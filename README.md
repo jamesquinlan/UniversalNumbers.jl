@@ -1,7 +1,7 @@
 # <img src="universalnumbers.svg" width="45" height="45" align="absmiddle"/> UniversalNumbers.jl
 
 [![CI](https://github.com/jamesquinlan/UniversalNumbers.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesquinlan/UniversalNumbers.jl/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/jamesquinlan/UniversalNumbers.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jamesquinlan/UniversalNumbers.jl)
+[![codecov](https://codecov.io/github/jamesquinlan/UniversalNumbers.jl/graph/badge.svg?token=3VV295J5Z6)](https://codecov.io/github/jamesquinlan/UniversalNumbers.jl)
 [![Aqua](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 <!-- DOI badge after Zenodo archives the v0.1.0 release, replace XXXXXXX with the (concept) DOI and uncomment:
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
@@ -26,7 +26,7 @@ a platform installer from the [downloads page](https://julialang.org/downloads/)
 pre-built bridge library is downloaded automatically via `UniversalNumbers_jll`; no C++
 compiler or CMake is needed.
 
-### Docker (build from source)
+### Docker
 
 A [`Dockerfile`](Dockerfile) builds the C++ bridge and a ready-to-use Julia
 environment, so no local C++ toolchain or Julia install is needed:
@@ -46,12 +46,12 @@ a = Posit{16,1}(1.5)
 b = Posit{16,1}(2.5)
 a + b                        # Posit{16,1}(4.0)
 sqrt(Posit{32,2}(2.0))       # Posit{32,2}(1.4142135623842478)
-a + 2.5                      # promotes 2.5 -> Posit{16,1}: Posit{16,1}(4.0)
+a + 2.5                      # Promotes 2.5 -> Posit{16,1}: Posit{16,1}(4.0)
 
 using LinearAlgebra
 A = [Posit{32,2}(4) Posit{32,2}(1); Posit{32,2}(1) Posit{32,2}(3)]
 b = [Posit{32,2}(1), Posit{32,2}(2)]
-A \ b                        # solve Ax = b in posit arithmetic
+A \ b                        # Solve Ax = b in posit arithmetic
 ```
 
 ## Supported types
@@ -222,10 +222,10 @@ numerical kernels — e.g. compare a `Posit{16,1}` matrix factorization against
 are exact while values like `1.5` are stored as the nearest representable power-of-two
 fraction. This is inherent to the number system.
 
-### Quire support — exact fused dot product
+### Quire support
 
 Posits carry an associated **quire**, a wide fixed-point accumulator that sums products
-with no intermediate rounding. `fdp` uses it to compute an **exact fused dot product** —
+with no intermediate rounding. `fdp` uses it to compute an **exact fused dot product**; 
 every term is accumulated exactly and the result is rounded only once, at the end:
 
 ```julia
@@ -342,15 +342,6 @@ Yggdrasil directly.
 
 ```bibtex
 
-% --- Cite this package ---
-@software{universalnumbers_jl,
-  author  = {Quinlan, James and Arciero, Mike},
-  title   = {{UniversalNumbers.jl}: Next-generation computer arithmetic in {Julia}},
-  year    = {2026},
-  url     = {https://github.com/jamesquinlan/UniversalNumbers.jl},
-  note    = {Julia package. TODO: add Zenodo DOI and/or JOSS paper once published}
-}
-
 @article{gustafson2017beating,
   title   = {Beating Floating Point at its Own Game: Posit Arithmetic},
   author  = {Gustafson, John L. and Yonemoto, Isaac},
@@ -421,7 +412,7 @@ Yggdrasil directly.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT -- see [`LICENSE`](LICENSE).
 
 ### Bundled third-party code
 
