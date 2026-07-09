@@ -11,6 +11,9 @@ jobs:
     name: Julia ${{ matrix.version }} — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # nightly is unreleased Julia; its LinearAlgebra/SparseArrays churn can break
+    # tests (e.g. sparse QR) through no fault of ours, so it must not fail CI.
+    continue-on-error: ${{ matrix.version == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
