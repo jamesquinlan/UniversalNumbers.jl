@@ -213,8 +213,7 @@ A few types behave in ways worth knowing before you rely on them:
 
 ## Linear algebra
 
-All types compose with Julia's `LinearAlgebra` — computations run entirely in the chosen
-number system:
+All types compose with Julia's `LinearAlgebra` (computations run in the chosen number system):
 
 ```julia
 using UniversalNumbers, LinearAlgebra
