@@ -21,10 +21,25 @@ and compose with the standard library.
 pkg> add UniversalNumbers
 ```
 
-Requires [Julia](https://julialang.org/downloads/) ≥ 1.10 (install it with `juliaup` or
-a platform installer from the [downloads page](https://julialang.org/downloads/)). The
-pre-built bridge library is downloaded automatically via `UniversalNumbers_jll`; no C++
-compiler or CMake is needed.
+The pre-built bridge library is downloaded automatically via `UniversalNumbers_jll`; no C++ compiler or CMake is needed.
+
+### Installing Julia
+
+UniversalNumbers.jl requires [Julia](https://julialang.org/downloads/) ≥ 1.10 (install Julia with `juliaup` or
+a platform installer from the [downloads page](https://julialang.org/downloads/)).  
+
+**Linux or macOS**: The following will install the latest stable version of Julia, as well as the juliaup tool. Start Julia from the command-line by typing `julia`. See `juliaup --help` for how to configure installed versions. If you prefer to use manual installation using a GUI-based installer, see the [Manual Downloads](https://julialang.org/downloads/manual-downloads/) page.
+
+```bash
+curl -fsSL https://install.julialang.org | sh
+```
+
+**Windows**: Install Julia using the [MSIX App Installer](https://install.julialang.org/Julia.appinstaller). Alternatively, if you have access to the Microsoft Store, you can install Julia by running the following in the command prompt. 
+
+```bash
+winget install --name Julia --id 9NJNWW8PVKMN -e -s msstore
+```
+
 
 ### Docker
 
