@@ -968,6 +968,7 @@ include("printbits.jl")
 include("takums.jl")
 include("rounding.jl")
 include("linalg_fallbacks.jl")
+include("promotion_math_fallbacks.jl")
 
 # ---------------------------------------------------------------------------
 # Aqua.jl quality assurance. Aqua is a test-only dependency ([extras]), so this
