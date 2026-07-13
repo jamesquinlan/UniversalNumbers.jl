@@ -139,16 +139,16 @@ All types implement the full `AbstractFloat` interface:
 - **Construction** from any `Real`: `Posit{16,1}(1.5)`, `CFloat{8,2}(2)`, `LNS{16,5}(pi)`
 - **Conversion back**: `Float64(x)`, `Float32(x)`
 - **Arithmetic**: `+`, `-`, `*`, `/`, unary `-`, `abs`
-- **Math functions**: `sqrt`, `sin`, `cos`, `exp`, `log` — computed in the native number
+- **Math functions**: `sqrt`, `sin`, `cos`, `exp`, `log` -- computed in the native number
   system by Universal's C++ math library; rounding is determined by the type's parameters
-- **Comparisons**: `==`, `<`, `<=` use Universal's native operators — exact, no float round-trip
+- **Comparisons**: `==`, `<`, `<=` use Universal's native operators -- exact, no float round-trip
 - **Promotion**: mixed expressions like `p + 2.5` or `2 * p` convert the standard number
   into the universal type; the computation happens in posit/cfloat/LNS/takum arithmetic
 - **Constants**: `zero`, `one`, `eps`, `floatmin`, `floatmax`
 - **Predicates**: `iszero`, `isnan`, `isinf`
 - **Adjacent values**: `nextfloat(x)` / `prevfloat(x)` via Universal's `++`/`--` operators
 - **Random generation**: `rand(Posit{16,1})`, `rand(Posit{16,1}, 4, 4)`
-- **Broadcasting**: full `.` syntax — `sin.(A)`, `A .+ 1.0`
+- **Broadcasting**: full `.` syntax -- `sin.(A)`, `A .+ 1.0`
 
 The raw bit encoding is always accessible as `x.data`.
 
@@ -182,7 +182,7 @@ true
 
 All properties follow from the posit standard (useed = 2^(2^ES)); all registered types are verified by the test suite.
 
-- **Reciprocal symmetry**: `floatmin(T) * floatmax(T) == 1.0` exactly — every dynamic-range
+- **Reciprocal symmetry**: `floatmin(T) * floatmax(T) == 1.0` exactly -- every dynamic-range
   extreme has an exact reciprocal. IEEE `Float16` gives `floatmin * floatmax ≈ 4`.
 - **Sign symmetry**: negation is 2's complement of the encoding; every value has an exact negation.
 - **One zero, one NaR**: no `-0`, no `Inf`.
@@ -190,17 +190,17 @@ All properties follow from the posit standard (useed = 2^(2^ES)); all registered
 
 | Type | useed | maxpos | minpos | minpos·maxpos |
 |---|---|---|---|---|
-| `Posit{8,0}` | 2 | 2^6 = 64 | 2^−6 ≈ 1.56e-2 | 1.0 |
-| `Posit{8,1}` | 4 | 4^6 = 4096 | 4^−6 ≈ 2.44e-4 | 1.0 |
-| `Posit{8,2}` | 16 | 16^6 ≈ 1.68e7 | 16^−6 ≈ 5.96e-8 | 1.0 |
-| `Posit{12,1}` | 4 | 4^10 ≈ 1.05e6 | 4^−10 ≈ 9.54e-7 | 1.0 |
-| `Posit{16,1}` | 4 | 4^14 ≈ 2.68e8 | 4^−14 ≈ 3.73e-9 | 1.0 |
-| `Posit{16,2}` | 16 | 16^14 ≈ 7.21e16 | 16^−14 ≈ 1.39e-17 | 1.0 |
-| `Posit{19,2}` | 16 | 16^17 ≈ 2.95e20 | 16^−17 ≈ 3.39e-21 | 1.0 |
-| `Posit{19,3}` | 256 | 256^17 ≈ 8.71e40 | 256^−17 ≈ 1.15e-41 | 1.0 |
-| `Posit{32,2}` | 16 | 16^30 ≈ 1.33e36 | 16^−30 ≈ 7.52e-37 | 1.0 |
-| `Posit{64,2}` | 16 | 16^62 ≈ 4.52e74 | 16^−62 ≈ 2.21e-75 | 1.0 |
-| `Posit{64,3}` | 256 | 256^62 ≈ 2.05e149 | 256^−62 ≈ 4.90e-150 | 1.0 |
+| `Posit{8,0}` | 2 | 2^6 = 64 | 2^-6 ≈ 1.56e-2 | 1.0 |
+| `Posit{8,1}` | 4 | 4^6 = 4096 | 4^-6 ≈ 2.44e-4 | 1.0 |
+| `Posit{8,2}` | 16 | 16^6 ≈ 1.68e7 | 16^-6 ≈ 5.96e-8 | 1.0 |
+| `Posit{12,1}` | 4 | 4^10 ≈ 1.05e6 | 4^-10 ≈ 9.54e-7 | 1.0 |
+| `Posit{16,1}` | 4 | 4^14 ≈ 2.68e8 | 4^-14 ≈ 3.73e-9 | 1.0 |
+| `Posit{16,2}` | 16 | 16^14 ≈ 7.21e16 | 16^-14 ≈ 1.39e-17 | 1.0 |
+| `Posit{19,2}` | 16 | 16^17 ≈ 2.95e20 | 16^-17 ≈ 3.39e-21 | 1.0 |
+| `Posit{19,3}` | 256 | 256^17 ≈ 8.71e40 | 256^-17 ≈ 1.15e-41 | 1.0 |
+| `Posit{32,2}` | 16 | 16^30 ≈ 1.33e36 | 16^-30 ≈ 7.52e-37 | 1.0 |
+| `Posit{64,2}` | 16 | 16^62 ≈ 4.52e74 | 16^-62 ≈ 2.21e-75 | 1.0 |
+| `Posit{64,3}` | 256 | 256^62 ≈ 2.05e149 | 256^-62 ≈ 4.90e-150 | 1.0 |
 
 ## Known limitations and semantics
 
@@ -262,7 +262,7 @@ end
 Posit{32,2}(q)                     # round once
 ```
 
-The quire is **opt-in and posit-only** — ordinary posit arithmetic and dot products are
+The quire is **opt-in and posit-only** -- ordinary posit arithmetic and dot products are
 unchanged, so rounded and fused results can be compared in the same program. See
 [`examples/quire.jl`](examples/quire.jl) for a worked accuracy comparison.
 
@@ -330,7 +330,7 @@ UniversalNumbers.jl/
 
 ## Contributing
 
-Contributions are welcome — bug reports, new type registrations, and build/CI improvements. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide (adding a type, the JLL build, and design notes).
+Contributions are welcome, including bug reports and build/CI improvements. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide (adding a type, the JLL build, and design notes).
 
 **Building from source** is only needed for development -- users get the pre-built bridge library automatically via `UniversalNumbers_jll`. Prerequisites:
 
