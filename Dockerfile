@@ -7,7 +7,7 @@
 # reproducing CI, and for reviewers who want a one-command working environment.
 #
 #   docker build -t universalnumbers .
-#   docker run --rm -it universalnumbers                                  # Julia REPL with the package
+#   docker run --rm -it universalnumbers                                      # Julia REPL with the package
 #   docker run --rm -it universalnumbers julia --project=. test/runtests.jl   # run the test suite
 #
 # Julia 1.10 is the minimum supported version (see Project.toml [compat]).
