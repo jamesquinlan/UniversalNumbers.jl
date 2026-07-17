@@ -36,3 +36,11 @@ Each value is stored in a packed machine word, for example a `UInt16` for a 16-b
 The underlying C symbols are cached, so scalar operations avoid per-call lookup.
 The bridge library ships as a precompiled binary artifact, so users obtain working arithmetic without a C++ toolchain.
 The package is registered in the Julia General registry, while its binary dependency, UniversalNumbers_jll, is registered in Yggdrasil, so installation follows the standard `Pkg.add` workflow used for any other Julia package.
+
+# Statement of Need
+
+Research into computer arithmetic beyond IEEE-754's `Float16`/`Float32`/`Float64` has grown rapidly.
+This research is motivated by greater accuracy per bit, larger dynamic range, reproducibility, lower energy, and memory cost.
+Evaluating these claims often involves experimentation: running numerical algorithms such as linear solves, iterative refinement, ODE integration, and optimization in a potential format, then measuring accuracy, conditioning sensitivity, and failure modes.
+The same settings also support mixed-precision algorithm development.
+
