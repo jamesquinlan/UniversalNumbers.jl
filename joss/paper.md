@@ -44,3 +44,25 @@ This research is motivated by greater accuracy per bit, larger dynamic range, re
 Evaluating these claims often involves experimentation: running numerical algorithms such as linear solves, iterative refinement, ODE integration, and optimization in a potential format, then measuring accuracy, conditioning sensitivity, and failure modes.
 The same settings also support mixed-precision algorithm development.
 
+The Universal library is comprehensive and well tested, but written in C++ with template metaprogramming.
+Using it requires compiling C++, managing template instantiations, and rebuilding to try a new format or experiment.
+This is a barrier for the two audiences that most need these number systems: numerical analysts prototyping algorithms, and students and educators learning how floating point and its alternatives behave.
+
+`UniversalNumbers.jl` removes that barrier by exposing Universal's formats inside Julia.
+They can be used at the REPL and used in conjunction with several packages in Julia's  ecosystem.
+Switching arithmetic type is a one-line type change rather than a recompilation.
+Comparing `Posit{16,2}`, `Takum{16}`, and `Float16` on the same ill-conditioned linear system is a short script.
+
+The package is well suited for:
+
+- **Experimentation with next-generation arithmetic.** A format can be subjected to realistic workloads, including the package's worked examples of sparse LU/QR, mixed-precision iterative refinement, Krylov and stationary iterative solvers, and algebraic-multigrid preconditioning. One can observe, for instance, how a low-precision factorization drives iterative refinement to working-precision accuracy [@carson2018accelerating], or how Krylov methods respond to low-precision rounding differently from stationary iterations [@hunhold2025evaluation].
+
+- **Education.** Every value carries its exact format and can be inspected bit-by-bit with `printbits` and `about`. Instructors can demonstrate rounding, dynamic range, subnormals, and NaR/NaN semantics interactively, without the overhead of a compiled C++ project.
+
+By pairing Universal's arithmetic kernels with Julia's multiple dispatch and `LinearAlgebra`/`SparseArrays` integration [@bezanson2017julia], `UniversalNumbers.jl` turns a C++ library into a rapid-prototyping platform for computer-arithmetic research and education.
+
+The Julia ecosystem already offers single-format packages: `BFloat16s.jl` [@bfloat16s_jl] for bfloat16, `Posits.jl` [@posits_jl] and `SoftPosits.jl` [@softposits] for posits, `Takums.jl` [@takums_jl] for takums, and `Microfloats.jl` [@microfloats_jl] for 8-bit minifloats.
+Each has its own interface and conventions.
+`UniversalNumbers.jl` consolidates these formats behind a single `AbstractFloat` interface, so one dependency provides functionality equivalent to several of them.
+It also adds formats that no existing Julia package provides: configurable `cfloat`, logarithmic, fixed-point, IBM hexadecimal, decimal, and double-double.
+
