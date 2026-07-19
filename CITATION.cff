@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+type: software
+title: "UniversalNumbers.jl: Next-generation computer arithmetic in Julia"
+abstract: >-
+  Julia bindings to the Stillwater Universal C++ library, exposing posits,
+  classic floats (cfloat), logarithmic number systems, takums, fixed-point,
+  IBM hexadecimal floats, decimal floats, bfloat16, and double-double as
+  first-class AbstractFloat types under one consistent interface.
+authors:
+  - family-names: Quinlan
+    given-names: James
+    orcid: "https://orcid.org/0000-0002-2628-1651"
+    affiliation: "University of Southern Maine"
+  - family-names: Arciero
+    given-names: Mike
+    orcid: "https://orcid.org/0009-0000-9107-6171"
+    affiliation: "University of Southern Maine"
+repository-code: "https://github.com/jamesquinlan/UniversalNumbers.jl"
+url: "https://github.com/jamesquinlan/UniversalNumbers.jl"
+license: MIT
+version: 0.1.0
+date-released: "2026-06-29"
+keywords:
+  - Julia
+  - computer arithmetic
+  - posit
+  - takum
+  - floating-point
+  - number systems
+  - reproducibility
+# TODO (after publishing):
+#   - add `doi:` with the Zenodo DOI for this version, and/or
+#   - add a `preferred-citation:` block pointing at the JOSS paper so the
+#     "Cite this repository" button suggests the paper instead of the software.
