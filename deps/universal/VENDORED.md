@@ -7,9 +7,13 @@ upstream license is retained in `LICENSE` alongside this file.
 - **Source chain:** github.com/stillwater-sc/universal (upstream)
   → github.com/jamesquinlan/universal (fork)
   → local clone → copied into `include/` here.
-- **Current snapshot:** commit `321409d6b6e2c98ae1ceb5894118960feffc8e75`
-  (upstream main as of 2026-06-17; vendored 2026-06-17; elreal streaming math #1073-#1078;
-  only elreal headers changed — posit/cfloat/takum/lns/fixpnt/bfloat16/dd/hfloat/dfloat unchanged).
+- **Current snapshot:** commit `ba587e3d2541845adcda3f0b94831f651764fa8f`
+  (upstream main as of 2026-07-17; vendored 2026-07-20). Change affecting wrapped types:
+  bfloat16 float-cast now rounds to nearest-even instead of truncating, and preserves NaN
+  (upstream #1134). Everything else new in this range is number systems we do not wrap
+  (efloat, elreal) plus docs/tests, so only bfloat16 behavior changed for us.
+- **Previous snapshot:** commit `321409d6b6e2c98ae1ceb5894118960feffc8e75`
+  (upstream main as of 2026-06-17; vendored 2026-06-17).
 - **No local additions:** `CMakeLists.txt` points at `deps/universal/include/sw`,
   so Universal's own headers resolve directly — no symlinks needed.
 

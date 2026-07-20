@@ -112,31 +112,32 @@ inline ZBCL<FpType> odd_power_series(ZBCL<FpType> x, bool alternating, std::size
     return infsum(ops_term_stream(x, step, 1.0, floor_exp));
 }
 
+// e_term_stream: the lazy term co-list of e = sum_{n>=0} 1/n! -- term_n =
+// term_{n-1} / n (exact integer div, so each 1/n! keeps full ZBCL precision rather
+// than collapsing to ~k host bits). Each term is windowed to its significance band
+// (take_while_above), so the deep tail computes ZERO extra blocks. Folded by the
+// streaming infSum in e_zbcl. (#1061 Phase 3b -- same online shape as exp_term_stream.)
+template <typename FpType>
+inline series<FpType> e_term_stream(ZBCL<FpType> term, double n, int floor_exp) {
+    if (term.is_empty() || static_cast<int>(term.head().exponent()) < floor_exp)
+        return series<FpType>{};
+    ZBCL<FpType> next = take_while_above(div_online(term, from_native<FpType>(n)), floor_exp);
+    return series<FpType>::cons(term, [next, n, floor_exp]() {
+        return e_term_stream(next, n + 1.0, floor_exp);
+    });
+}
+
 } // namespace detail
 
-// e = exp(1) = sum_{n>=0} 1/n!
+// e = exp(1) = sum_{n>=0} 1/n!. ONLINE (streaming infSum over a significance-windowed
+// term co-list, #1061 Phase 3b) -- ~100x faster than the previous eager form (every
+// term to full working depth + a batch priestRenorm sum), value-identical and
+// 0-overlap canonical. Carries kSeriesGuard extra working blocks like the other series.
 template <typename FpType>
 inline ZBCL<FpType> e_zbcl(std::size_t depth = 32) {
-    // Each term must carry FULL ZBCL precision. A previous version built the term
-    // as a host double 1.0/n!, so every term was rounded to ~k bits and the sum was
-    // only good to ~k bits (~16 digits for double) no matter how many terms -- the
-    // exact-dyadic oracle caught this. Instead accumulate the reciprocal factorial
-    // as a ZBCL: term_n = term_{n-1} / n (exact div), so 1/n! keeps depth-block
-    // precision. Carry kSeriesGuard extra working blocks (like odd_power_series) so
-    // accumulation error does not eat the deepest output components, and stop at the
-    // working-depth precision / denormal floor.
     const std::size_t wdepth = depth + detail::kSeriesGuard;
-    const int stop_exp = detail::series_stop_exp<FpType>(wdepth);
-    std::vector<ZBCL<FpType>> terms;
-    ZBCL<FpType> term = from_native<FpType>(1.0);    // 1/0! = 1
-    terms.push_back(term);
-    const std::size_t maxTerms = 64 * depth + 64;    // generous; convergence breaks first
-    for (std::size_t n = 1; n < maxTerms; ++n) {
-        term = div(term, from_native<FpType>(static_cast<double>(n)), wdepth);   // 1/n!
-        if (term.is_empty() || term.head().exponent() < stop_exp) break;
-        terms.push_back(term);
-    }
-    return sum(series_from_vector<FpType>(terms), terms.size() + 1);
+    const int floor_exp = detail::series_stop_exp<FpType>(wdepth);
+    return infsum(detail::e_term_stream(from_native<FpType>(1.0), 1.0, floor_exp));
 }
 
 // ln2 = 2 * artanh(1/3)
@@ -192,16 +193,17 @@ inline ZBCL<FpType> phi_zbcl(std::size_t depth = 16) {
 //   B(n) = sum_{k>=0} (n^k/k!)^2,  A(n) = sum_{k>=0} (n^k/k!)^2 * H_k,  H_0 = 0,
 //   |error| ~ pi*exp(-4n)  ->  n >= D*ln(10)/4 for D digits.
 // The Euler-Mascheroni constant has no rapidly-converging elementary series, so
-// (unlike pi/e/ln2) it needs a real algorithm. The per-term work is dominated by
-// the product w_k * H_k; the long tail of terms contributes only a few limbs each.
+// (unlike pi/e/ln2) it needs a real algorithm. The A(n) = sum_k w_k H_k sum is
+// computed by Abel summation (sum tail_k/(k+1)) -- no harmonic numbers, no per-term
+// full multiply. Full derivation, the cancellation analysis, and the deferred
+// binary-splitting alternative are in docs/design/elreal-euler-gamma.md (#1061 Ph3b).
 //
 // HOST RANGE: the intermediate w_k = (n^k/k!)^2 peaks at ~exp(2n) near k=n. n grows
 // with the requested precision (n ~ D*ln(10)/4), and the block significand carries
 // that magnitude, so a NARROW-exponent host (float/bfloat16, max ~10^38) overflows
 // once n exceeds ~44 (a few blocks of depth). High-precision euler_gamma is therefore
 // a double-host generator; on narrow hosts keep depth shallow (n below the overflow).
-// Validated to 307 digits on double (#1053); eager like the other constants -- the
-// online-ops speedup for the whole series layer is #1061 Phase 3.
+// Validated to 305 digits on double vs the 320-digit reference (#1053, REGRESSION_LEVEL_4).
 template <typename FpType>
 inline ZBCL<FpType> euler_gamma_zbcl(std::size_t depth = 16) {
     using B = block<FpType>;
@@ -216,47 +218,55 @@ inline ZBCL<FpType> euler_gamma_zbcl(std::size_t depth = 16) {
     const std::size_t cap = wdepth + 2;
     auto fold = [cap](std::vector<B>& acc, const ZBCL<FpType>& term, std::size_t take) {
         std::vector<B> pool = acc;
-        for (const auto& b : term.take(take)) pool.push_back(b);
+        const auto blocks = term.take(take);
+        pool.insert(pool.end(), blocks.begin(), blocks.end());
         acc = priestRenorm(pool);
         if (acc.size() > cap) acc.resize(cap);
     };
-    // Pass 1: locate the GLOBAL peak exponent of w_k = (n^k/k!)^2 -- it grows to ~k=n
-    // then decays. The scalar w-recurrence is cheap; knowing the peak up front lets the
-    // A-accumulation window each product to A's significance band, so BOTH the tiny
-    // early terms and the decaying tail are skipped -- only the ~sqrt(n) terms near the
-    // peak are multiplied in full. (#1061 Phase 3b)
-    int peakExp = static_cast<int>(one.head().exponent());
-    {
-        ZBCL<FpType> w = one;
-        for (std::size_t k = 1; ; ++k) {
-            w = div(mul_scalar(B{ static_cast<FpType>(n2), 0 }, w, wdepth),
-                    from_native<FpType>(static_cast<double>(k) * static_cast<double>(k)), wdepth);
-            if (w.is_empty()) break;
-            peakExp = std::max(peakExp, static_cast<int>(w.head().exponent()));
-            if (k > static_cast<std::size_t>(n) &&
-                static_cast<int>(w.head().exponent()) < peakExp - wbits - 8) break;
-        }
-    }
-    // A keeps ~cap blocks below its peak (~peakExp); a product whose blocks all sit below
-    // that floor contributes nothing, so pull each w_k*H_k only down to it. aFloor sits a
-    // touch below A's true floor (A.peak = peakExp + scale(H_k)), so nothing is lost.
+    // A(n) = sum_k w_k H_k is computed by ABEL SUMMATION as A = sum_{k>=0} tail_k/(k+1)
+    // with tail_k = sum_{j>k} w_j = B - B_k. This is all-positive accumulation that needs
+    // NO harmonic numbers and NO full per-term multiply: each term is a single-block scalar
+    // division tail_k/(k+1) (fast) in place of mul_online(w_k, H_k) (full ZBCL x ZBCL).
+    // (Algebraically: sum w_k H_k = sum_{k} (sum_{j>k} w_j)/(k+1); validated to 320 digits.)
+    //
+    // Windowing peak: w_k=(n^k/k!)^2 peaks near k=n at log2(w_n) ~ 2n*log2(e) - log2(2*pi*n)
+    // (Stirling, ~1-bit accurate). A keeps cap (=wdepth+2) blocks below it; the tail
+    // subtraction's cancellation right of the peak (where its terms are negligible) stays
+    // inside that guard. The analytic peak replaces a redundant peak-finding pass. (#1061 Ph3b)
+    const double npd = static_cast<double>(n);
+    const int peakExp = std::max(0, static_cast<int>(std::llround(
+        2.0 * npd * 1.4426950408889634 - std::log2(6.283185307179586 * npd))));
     const int aFloor = peakExp - static_cast<int>(cap) * block<FpType>::k;
 
-    // Pass 2: accumulate A(n) = sum w_k H_k, B(n) = sum w_k, H_k = H_{k-1} + 1/k.
+    // Pass A: B(n) = sum_k w_k,  w_k = w_{k-1} * n^2/k^2.
     ZBCL<FpType> w = one;
-    std::vector<B> Hblocks, Bblocks = w.take(cap), Ablocks;
+    std::vector<B> Bblocks = w.take(cap);
     for (std::size_t k = 1; ; ++k) {
         w = div(mul_scalar(B{ static_cast<FpType>(n2), 0 }, w, wdepth),
-                from_native<FpType>(static_cast<double>(k) * static_cast<double>(k)), wdepth); // *n^2/k^2
+                from_native<FpType>(static_cast<double>(k) * static_cast<double>(k)), wdepth);
         if (w.is_empty()) break;
-        fold(Hblocks, div(one, from_native<FpType>(static_cast<double>(k)), wdepth), wdepth);   // H_k += 1/k
-        ZBCL<FpType> Hk = zbcl_from_blocks<FpType>(Hblocks);
         fold(Bblocks, w, cap);
-        fold(Ablocks, detail::take_while_above(mul_online(w, Hk), aFloor), cap);                // w_k * H_k, windowed
         if (k > static_cast<std::size_t>(n) &&
             static_cast<int>(w.head().exponent()) < peakExp - wbits - 8) break;
     }
-    ZBCL<FpType> ratio = div(zbcl_from_blocks<FpType>(Ablocks), zbcl_from_blocks<FpType>(Bblocks), wdepth);
+    const ZBCL<FpType> Bfull = zbcl_from_blocks<FpType>(Bblocks);
+
+    // Pass B: A(n) = sum_{k>=0} tail_k/(k+1), tail_k = B - B_k (forward subtraction of w_k).
+    ZBCL<FpType> tail = add(Bfull, negate(one));                          // tail_0 = B - w_0
+    std::vector<B> Ablocks;
+    fold(Ablocks, detail::take_while_above(tail, aFloor), cap);           // k=0: tail_0 / 1
+    w = one;
+    for (std::size_t k = 1; ; ++k) {
+        w = div(mul_scalar(B{ static_cast<FpType>(n2), 0 }, w, wdepth),
+                from_native<FpType>(static_cast<double>(k) * static_cast<double>(k)), wdepth);
+        if (w.is_empty()) break;
+        tail = add(tail, negate(w));                                      // tail_k = tail_{k-1} - w_k
+        fold(Ablocks, detail::take_while_above(
+                 div(tail, from_native<FpType>(static_cast<double>(k + 1)), wdepth), aFloor), cap);
+        if (k > static_cast<std::size_t>(n) &&
+            static_cast<int>(w.head().exponent()) < peakExp - wbits - 8) break;
+    }
+    ZBCL<FpType> ratio = div(zbcl_from_blocks<FpType>(Ablocks), Bfull, wdepth);
     // ln(n) = e*ln2 + 2*artanh((m-1)/(m+1)), m = n / 2^e in [1,2). Pass `depth` (NOT
     // wdepth): the helpers add their own kSeriesGuard, and ln2_zbcl=artanh(1/3) is
     // costly over-deep.
