@@ -1,6 +1,6 @@
 name = "UniversalNumbers"
 uuid = "438cb659-dcb9-46ca-8bd1-3c7a98a84c4c"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["James Quinlan <james.quinlan@maine.edu>"]
 
 [deps]
