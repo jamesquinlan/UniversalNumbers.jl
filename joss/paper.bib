@@ -1,3 +1,28 @@
+
+@misc{Bailey_dd,
+  author       = {David H. Bailey},
+  title        = {A {Fortran}-90 Double-Double Library},
+  note         = {Available at \url{http://www.nersc.gov/~dhbailey/mpdist/mpdist.html}}
+}
+
+@unpublished{bfloat16,
+	author  = {Shibo Wang and Pankaj Kanwar},
+	month   = aug,
+	title   = {{{BFloat16}: The secret to high performance on Cloud {TPU}s}},
+	url     = {https://cloud.google.com/blog/products/ai-machine-learning/bfloat16-the-secret-to-high-performance-on-cloud-tpus},
+	year    = {2019}
+}
+
+
+@misc{bfloat16s_jl,
+  author       = {TODO},
+  title        = {{BFloat16s.jl}},
+  howpublished = {\url{TODO}},
+  year         = {TODO},
+  note         = {PLACEHOLDER -- replace with full reference}
+}
+
+
 @article{bezanson2017julia,
   title   = {Julia: A Fresh Approach to Numerical Computing},
   author  = {Bezanson, Jeff and Edelman, Alan and Karpinski, Stefan and Shah, Viral B.},
@@ -9,15 +34,25 @@
   doi     = {10.1137/141000671}
 }
 
-@article{omtzigt2023universal,
-  title    = {Universal Numbers Library: Multi-format Variable Precision Arithmetic Library},
-  author   = {Omtzigt, E Theodore L and Quinlan, James},
-  journal  = {Journal of Open Source Software},
-  volume   = {8},
-  number   = {83},
-  pages    = {5072},
-  year     = {2023}
+@misc{briggs1998dd,
+  author       = {Keith Briggs},
+  title        = {Double-Double Floating Point Arithmetic},
+  year         = {1998},
+  note         = {\url{http://www-epidem.plantsci.cam.ac.uk/~kbriggs/doubledouble.html}}
 }
+
+
+@article{carson2018accelerating,
+  title={Accelerating the solution of linear systems by iterative refinement in three precisions},
+  author={Carson, Erin and Higham, Nicholas J},
+  journal={SIAM Journal on Scientific Computing},
+  volume={40},
+  number={2},
+  pages={A817--A847},
+  year={2018},
+  publisher={SIAM}
+}
+
 
 @article{gustafson2017beating,
   title   = {Beating Floating Point at its Own Game: Posit Arithmetic},
@@ -47,7 +82,6 @@
 }
 
 
-
 @inproceedings{hunhold2025evaluation,
   title         = {Evaluation of bfloat16, posit, and takum arithmetics in sparse linear solvers},
   author        = {Hunhold, Laslo and Quinlan, James},
@@ -67,13 +101,12 @@
   year          = {2025}
 }
 
-
-@unpublished{bfloat16,
-	author  = {Shibo Wang and Pankaj Kanwar},
-	month   = aug,
-	title   = {{{BFloat16}: The secret to high performance on Cloud {TPU}s}},
-	url     = {https://cloud.google.com/blog/products/ai-machine-learning/bfloat16-the-secret-to-high-performance-on-cloud-tpus},
-	year    = {2019}
+@article{IBM1964,
+  author  = {{IBM Corporation}},
+  title   = {{{IBM} System/360} Principles of Operation},
+  journal = {IBM Systems Reference Library},
+  year    = {1964},
+  note    = {Form A22-6821}
 }
 
 
@@ -89,36 +122,6 @@
 }
 
 
-@misc{Bailey_dd,
-  author       = {David H. Bailey},
-  title        = {A {Fortran}-90 Double-Double Library},
-  note         = {Available at \url{http://www.nersc.gov/~dhbailey/mpdist/mpdist.html}}
-}
-
-@misc{briggs1998dd,
-  author       = {Keith Briggs},
-  title        = {Double-Double Floating Point Arithmetic},
-  year         = {1998},
-  note         = {\url{http://www-epidem.plantsci.cam.ac.uk/~kbriggs/doubledouble.html}}
-}
-
-
-@article{IBM1964,
-  author  = {{IBM Corporation}},
-  title   = {{{IBM} System/360} Principles of Operation},
-  journal = {IBM Systems Reference Library},
-  year    = {1964},
-  note    = {Form A22-6821}
-}
-
-@book{Knuth1997,
-  author    = {Donald E. Knuth},
-  title     = {The Art of Computer Programming, Vol.~2: Seminumerical Algorithms},
-  publisher = {Addison-Wesley},
-  year      = {1997},
-  edition   = {3rd},
-  note      = {Fixed-point and floating-point arithmetic, \S{}4.1--4.2}
-}
 
 @article{Kingsbury1971,
   author  = {Nicholas G. Kingsbury and Peter J. W. Rayner},
@@ -130,6 +133,7 @@
   pages   = {56--58}
 }
 
+
 @misc{microfloats_jl,
   author       = {{Murrell Group}},
   title        = {{Microfloats.jl}: 8-bit floating-point formats for {Julia}},
@@ -138,12 +142,14 @@
   note         = {Julia package; verify author/year before submission}
 }
 
-@misc{bfloat16s_jl,
-  author       = {TODO},
-  title        = {{BFloat16s.jl}},
-  howpublished = {\url{TODO}},
-  year         = {TODO},
-  note         = {PLACEHOLDER -- replace with full reference}
+@article{omtzigt2023universal,
+  title    = {Universal Numbers Library: Multi-format Variable Precision Arithmetic Library},
+  author   = {Omtzigt, E Theodore L and Quinlan, James},
+  journal  = {Journal of Open Source Software},
+  volume   = {8},
+  number   = {83},
+  pages    = {5072},
+  year     = {2023}
 }
 
 @misc{posits_jl,
@@ -153,6 +159,22 @@
   year         = {TODO},
   note         = {PLACEHOLDER -- replace with full reference}
 }
+
+@software{quinlan_2026_21462151,
+  author       = {Quinlan, James and Arciero, Michael},
+  title        = {Universal{N}umbers.jl: Next-generation computer
+                   arithmetic in {J}ulia
+                  },
+  month        = jul,
+  year         = 2026,
+  publisher    = {Zenodo},
+  version      = {v0.1.2},
+  doi          = {10.5281/zenodo.21462151},
+  url          = {https://doi.org/10.5281/zenodo.21462151},
+}
+
+
+
 
 @software{softposits,
   author       = {Milan Kl\"{o}wer and Mos\`{e} Giordano and

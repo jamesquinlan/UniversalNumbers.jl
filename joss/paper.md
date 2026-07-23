@@ -24,12 +24,12 @@ bibliography: paper.bib
 
 # Summary
 
-`UniversalNumbers.jl` brings "next-generation" computer-arithmetic formats to Julia [@bezanson2017julia] through bindings to the Stillwater **Universal** C++ library [@omtzigt2023universal].
-Over thirty types are instantiated, spanning eight number-system families: (1) posits [@gustafson2017beating], (2) logarithmic number systems (LNS), (3) takums [@hunhold2024takum], (4) fixed-point, (5) IBM hexadecimal floats, (6) IEEE-754 [@ieee2019standard] floats with a configurable-width classic floats (`cfloat`, including 8-bit formats such as E4M3), (7) bfloat16 [@bfloat16], and (8) double-double [@briggs1998dd].
+`UniversalNumbers.jl` [@quinlan_2026_21462151] brings "next-generation" computer-arithmetic formats to Julia [@bezanson2017julia] through bindings to the Stillwater **Universal** C++ library [@omtzigt2023universal].
+Over thirty types are instantiated, spanning eight number-system families: (1) posits [@gustafson2017beating], (2) logarithmic number systems (LNS), (3) takums [@hunhold2024takum], (4) fixed-point, (5) IBM hexadecimal floats (HFP) [@IBM1964], (6) IEEE-754 [@ieee2019standard] floats with a configurable-width classic floats (`cfloat`, including 8-bit formats such as E4M3), (7) bfloat16 [@bfloat16], and (8) double-double [@Bailey_dd,@briggs1998dd].
 
 
-Each type is an `AbstractFloat` subtype of Julia's `Real` type (see URL).
-The package supports the full arithmetic and elementary-function interface, and works with most the Julia standard library `SparseArrays` and most `LinearAlgebra` functionality.
+Each type is an `AbstractFloat` subtype of Julia's `Real` type, which in turn is a subtype of `Number` (i.e.,  `julia> print_tree(Number)`).
+The package supports the full arithmetic and elementary-function interface, and works with many the Julia  libraries including `SparseArrays` and most of `LinearAlgebra` functionality.
 A type such as `Posit{16,2}` or `Takum{32}` can be dropped into existing code, so the numerical behavior of an algorithm can be studied across many formats from one program.
 
 Each value is stored in a packed machine word, for example a `UInt16` for a 16-bit posit, so arrays are unboxed.
@@ -65,4 +65,67 @@ The Julia ecosystem already offers single-format packages: `BFloat16s.jl` [@bflo
 Each has its own interface and conventions.
 `UniversalNumbers.jl` consolidates these formats behind a single `AbstractFloat` interface, so one dependency provides functionality equivalent to several of them.
 It also adds formats that no existing Julia package provides: configurable `cfloat`, logarithmic, fixed-point, IBM hexadecimal, decimal, and double-double.
+
+
+The nine supported families and their registered instantiations are summarized below.
+Each entry is a concrete `AbstractFloat` subtype backed by a specific Universal C++ template.
+
+| Family | Julia type | Description | Registered instances |
+|--------|-------------|------------|----------------------|
+| Posit | `Posit{N,ES}` | tapered-precision unum (Type III) | `{8,0}`, `{8,1}`, `{8,2}`, `{12,1}`, `{16,1}`, `{16,2}`, `{19,2}`, `{19,3}`, `{32,2}`, `{64,2}`, `{64,3}` |
+| Classic float | `CFloat{N,ES}` | configurable IEEE-style float | `{8,2}`, `{8,3}`, `{8,4}`, `{8,5}`, `{24,5}` |
+| Logarithmic | `LNS{N,R}` | logarithmic number system | `{16,5}`, `{32,16}` |
+| Takum | `Takum{N}` | tapered logarithmic format | `8`, `16`, `32`, `64` |
+| Fixed-point | `Fixed{N,R}` | modular fixed-point | `{8,4}`, `{16,8}`, `{32,16}` |
+| IBM hex float | `HFloat{N,ES}` | base-16 hexadecimal float | `{6,7}` (hfp32), `{14,7}` (hfp64) |
+| Decimal float | `DFloat{N,ES}` | IEEE 754-2008 decimal | `{7,6}` (decimal32), `{16,8}` (decimal64) |
+| Brain float | `BF16` | bfloat16 | single type |
+| Double-double | `DD` | compensated, ~106-bit significand | single type |
+
+The 8-bit formats are accelerated with precomputed lookup tables.
+Standard machine-learning FP8 aliases `E4M3`, `E3M4`, and `E5M2` are provided for the corresponding `CFloat{8,·}` types.
+Requesting an unregistered instantiation raises an informative error pointing to the type registry.
+
+Beyond the types themselves, the package provides:
+
+- **Full numeric interface**: arithmetic, comparison, `sqrt`, elementary and transcendental functions, `nextfloat`/`prevfloat`, `eps`/`floatmin`/`floatmax`, rounding, parsing, hashing, and promotion with built-in `Real` types.
+- **Linear algebra**: dense and sparse matrix arithmetic; LU and QR (including a Givens solve that never forms `Q`); `\`; and Float64-image fallbacks for `eigen`, `svd`, `cholesky`, and `cond` where no native generic path exists.
+- **Exact fused dot product (quire)**: for posits, the package exposes Universal's *quire*, a wide fixed-point accumulator that sums products with no intermediate rounding and rounds once at the end. It is a native binding to Universal's `quire<posit<N,ES>>` rather than a Julia re-implementation, so it preserves the library's speed. `fdp(a, b)` (alias `quire_dot`) computes an exact fused dot product, and an explicit `Quire` accumulator supports hand-rolled accumulation. The quire is opt-in: ordinary posit arithmetic is unaffected, so rounded and fused results can be compared in one program.
+- **Interoperability** with mulitple Julia registry packages including: `IterativeSolvers.jl` and `AlgebraicMultigrid.jl` (for example, preconditioned GMRES) for concrete-element-type matrices.
+- **Inspection tools** `printbits` and `about`, which show the colorized bit-level encoding and decoded fields of any value.
+
+# Examples
+
+```julia
+using UniversalNumbers, LinearAlgebra
+
+for T in (Float64, Posit{16,2}, Takum{16})
+    A = T[4 1; 1 3]
+    b = A * ones(T, 2)
+    x = A \ b
+    println(T, ": residual = ", norm(Float64.(A*x - b)))
+end
+```
+
+The same algorithm runs unchanged across formats, so accuracy comparisons reduce to iterating over a list of types.
+
+The fused dot product illustrates the kind of accuracy study the package enables.
+For posits, `fdp` accumulates products in the quire without intermediate rounding:
+
+```julia
+using UniversalNumbers
+a = rand(Posit{32,2}, 2000) 
+b = rand(Posit{32,2}, 2000)
+s_naive = sum(a .* b)   		# rounds after every multiply and add
+s_quire = fdp(a, b)     		# exact accumulation, rounds once
+```
+
+In a representative experiment (2000 random `Posit{32,2}` terms; see `examples/quire.jl`), the fused dot product reduces the error of the dot product by about 337× relative to the naively rounded sum.
+The residual contains only the single final rounding to `Posit{32,2}`.
+
+# Acknowledgements
+
+We thank E. Theodore L. Omtzigt and the Stillwater Universal contributors for the underlying C++ arithmetic library, and Laslo Hunhold for the Takum reference implementation and the sparse LU/QR routines adapted in this package.
+
+# References
 
