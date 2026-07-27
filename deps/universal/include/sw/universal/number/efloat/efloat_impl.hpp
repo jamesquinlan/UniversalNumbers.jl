@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: MIT
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
+#include <cmath>      // std::fpclassify, std::frexp, std::ldexp (long double conversions)
 #include <string>
 #include <sstream>
 #include <iostream>
@@ -111,11 +112,12 @@ public:
 	// "_limb has one element of value 0" representation for callers that
 	// inspect bits()/significant().  Sign-only and state-only selectors
 	// and modifiers operate purely on the trivial members and are
-	// constexpr-clean.  Compound arithmetic and free comparison operators
-	// are currently stubs (returning *this or a constant) and are
-	// therefore promoted to constexpr too -- the surface lights up at
-	// constant evaluation today, and real arithmetic semantics will
-	// inherit constexpr automatically when implemented.
+	// constexpr-clean.  Compound arithmetic and the free comparison
+	// operators are fully implemented and used at runtime; they still
+	// carry the constexpr specifier for a uniform interface, but because
+	// they operate on the heap-allocated _limb expansion they escape
+	// constant evaluation (the same #747 transient-allocation limit) and
+	// so cannot be exercised in a constant expression.
 	// Out of scope (heap-escape boundary): native-type ctors / operator=
 	// (convert_ieee754 calls std::fpclassify which is not constexpr in
 	// C++20), conversion-out (std::pow), parse() (std::regex).
@@ -181,9 +183,76 @@ public:
 
 #if LONG_DOUBLE_SUPPORT
 	efloat(long double iv)                      noexcept { *this = iv; }
-	efloat& operator=(long double rhs)          noexcept { return convert_ieee754(rhs); }
-	explicit operator long double()       const noexcept { return convert_to_ieee754<long double>(); }
-#endif 
+
+	// convert_ieee754 only builds limbs for sizeof(Real) of 4 or 8, so a wide
+	// long double (sizeof 16 on x86-64) produced 0. Decompose instead: frexp the
+	// value into m * 2^e with m in [0.5,1) (safely inside double's range), split m
+	// into an exact sum of doubles via the working double path, then apply e with
+	// setexponent(). This preserves the full long double significand AND its
+	// extended exponent range. Platforms where long double == double take the
+	// direct path.
+	efloat& operator=(long double rhs) noexcept {
+		if constexpr (sizeof(long double) <= sizeof(double)) {
+			return convert_ieee754(static_cast<double>(rhs));
+		}
+		else {
+			switch (std::fpclassify(rhs)) {
+			case FP_ZERO:
+			case FP_NAN:
+			case FP_INFINITE:
+				return convert_ieee754(static_cast<double>(rhs));
+			default:
+				break;
+			}
+			int e = 0;
+			long double m = std::frexp(rhs, &e);
+			clear();
+			long double r = m;
+			for (int i = 0; i < 8 && r != 0.0L; ++i) {
+				double hi = static_cast<double>(r);
+				if (hi == 0.0) break;   // remainder fell below double's range
+				*this += efloat(hi);
+				r -= static_cast<long double>(hi);
+			}
+			if (!iszero()) setexponent(scale() + e);
+			return *this;
+		}
+	}
+
+	explicit operator long double() const noexcept {
+		if constexpr (sizeof(long double) <= sizeof(double)) {
+			return static_cast<long double>(convert_to_ieee754<double>());
+		}
+		else {
+			switch (_state) {
+			case FloatingPointState::Zero:         return _sign ? -0.0L : 0.0L;
+			case FloatingPointState::QuietNaN:
+			case FloatingPointState::SignalingNaN: return std::numeric_limits<long double>::quiet_NaN();
+			case FloatingPointState::Infinite:     return _sign ? -std::numeric_limits<long double>::infinity()
+			                                                     :  std::numeric_limits<long double>::infinity();
+			case FloatingPointState::Normal:
+			default:
+				break;
+			}
+			// bring |x| into [1,2), extract as an exact sum of doubles, then scale
+			// by the true (wide) exponent -- the dual of the assignment above.
+			const std::int64_t k = scale();
+			efloat n(*this);
+			n.setsign(false);
+			n.setexponent(0);
+			long double s = 0.0L;
+			efloat r(n);
+			for (int i = 0; i < 4 && !r.iszero(); ++i) {
+				double hi = static_cast<double>(r);
+				if (hi == 0.0) break;
+				s += static_cast<long double>(hi);
+				r -= efloat(hi);
+			}
+			if (_sign) s = -s;
+			return std::ldexp(s, static_cast<int>(k));
+		}
+	}
+#endif
 
 	// instance precision management
 	unsigned get_precision() const noexcept { return _precision_limbs * 32; }
@@ -1262,9 +1331,20 @@ private:
 	////////////////////////////////////////////////////////////////////////////////
 	////////////////////////    efloat functions   /////////////////////////////////
 
+// abs(a): absolute value. Clears the sign on a copy, which is correct for
+// every state: a negative normal becomes positive, -inf becomes +inf, -0
+// becomes +0, and a NaN stays a NaN (its sign is irrelevant to isnan()).
 template<unsigned nlimbs>
 inline efloat<nlimbs> abs(const efloat<nlimbs>& a) {
-	return a; // (a < 0 ? -a : a);
+	efloat<nlimbs> result(a);
+	result.setsign(false);
+	return result;
+}
+
+// fabs(a): floating-point absolute value (C <cmath> spelling); same as abs.
+template<unsigned nlimbs>
+inline efloat<nlimbs> fabs(const efloat<nlimbs>& a) {
+	return abs(a);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1275,12 +1355,16 @@ inline efloat<nlimbs> abs(const efloat<nlimbs>& a) {
 //   - "nan", "inf", "infinity" (case-insensitive, optional sign)
 //   - decimal / scientific literals routed through decimal_to_binary::convert
 //     ("1.5", "-3.14e2", "1e-100", "0x" is not accepted)
-// The d2b target_mantissa_bits is sized to fill efloat's available limb
-// storage, capped at 2040 bits (just under the d2b BigBits budget of 2048).
-// For larger nlimbs the parsed value uses 2040 explicit bits of precision
-// and lower limbs stay zero -- that is exact for any practical literal a
-// user types (a decimal exponent within ~+/-600).
-template<unsigned nlimbs>
+//
+// The d2b target precision is bounded by the working budget BigBits (default
+// decimal_to_binary::default_big_bits): convert<BigBits>'s reduction shifts the
+// digit-integer left by ~(target + 3*neg_E) bits, which must fit in BigBits, so
+// target is sized overflow-safely below that (a request beyond the ceiling is
+// correctly rounded to the ceiling rather than returning garbage -- issue
+// #1141). To parse to very high precision (e.g. a 1000-digit constant), pass a
+// larger budget: parse<16384>(text, value). The default (2048) comfortably
+// covers any literal a user types at ordinary precision.
+template<unsigned BigBits, unsigned nlimbs>
 bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	value.clear();
 
@@ -1316,12 +1400,53 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	}
 
 	// Decimal / scientific literal.
-	constexpr unsigned cap_bits  = sw::universal::decimal_to_binary::default_big_bits - 8u;
-	unsigned want_bits = value.get_precision();
-	unsigned target_bits = (want_bits == 0u) ? 1u
-	                              : ((want_bits < cap_bits) ? want_bits : cap_bits);
+	//
+	// convert<BigBits>'s intermediate must fit in BigBits, and it grows two ways
+	// depending on the effective base-10 exponent E (= exp10 - #fractional-digits):
+	//   - E < 0 (sub-unit places): left-shifts the digit-integer by roughly
+	//     (target_bits + 3*neg_E) bits, so target cannot approach BigBits.
+	//   - E > 0 (large magnitude): multiplies by 5^E, growing the digit-integer
+	//     by ~E*log2(5) < 3*E bits, independent of target.
+	// Both are bounded by ~3 bits per "decimal place away from the unit". If even
+	// the digit-integer plus that growth cannot fit in BigBits, the literal is too
+	// large/small for this budget and we report failure (rather than returning the
+	// garbage a silent overflow would produce -- issue #1141). Otherwise target is
+	// sized to leave headroom; a request beyond the safe ceiling is correctly
+	// rounded to that ceiling. Callers needing more precision or a wider magnitude
+	// pass a larger BigBits, e.g. parse<16384>(...).
+	auto scan = sw::universal::string_parse::scan_decimal_float(s);
+	if (!scan.valid) return false;
 
-	auto r = sw::universal::decimal_to_binary::convert(s, target_bits);
+	const std::int64_t  E        = static_cast<std::int64_t>(scan.exp10)
+	                             - static_cast<std::int64_t>(scan.frac_part.size());
+	const std::uint64_t neg_E    = (E < 0) ? static_cast<std::uint64_t>(-E) : 0ull;
+	const std::uint64_t pos_E    = (E > 0) ? static_cast<std::uint64_t>( E) : 0ull;
+	const std::uint64_t mag      = (neg_E > pos_E) ? neg_E : pos_E;        // one is 0
+	const std::uint64_t sig      = scan.int_part.size() + scan.frac_part.size();
+	const std::uint64_t sig_bits = sig * 34ull / 10ull + 8ull;            // ~3.33 bits/digit + guard
+
+	// If the digit-integer plus its 5^|E| growth cannot fit, this budget is too
+	// small for the literal's magnitude -- fail rather than overflow to garbage.
+	if (sig_bits + 3ull * mag + 64ull > BigBits) return false;
+
+	// Overflow-safe target. For E<0 the shift is target-relative, so cap target
+	// below BigBits - (3*neg_E + sig_bits). For E>=0 the growth is target-
+	// independent (already checked to fit), so target may go up to BigBits - 64.
+	unsigned safe_ceiling;
+	if (E < 0) {
+		const std::uint64_t overhead = 3ull * neg_E + sig_bits + 64ull;
+		safe_ceiling = (BigBits > overhead) ? static_cast<unsigned>(BigBits - overhead) : 1u;
+	}
+	else {
+		safe_ceiling = (BigBits > 64u) ? (BigBits - 64u) : 1u;
+	}
+
+	unsigned want_bits   = value.get_precision();
+	unsigned target_bits = (want_bits == 0u) ? 1u
+	                     : (want_bits < safe_ceiling ? want_bits : safe_ceiling);
+	if (target_bits == 0u) target_bits = 1u;
+
+	auto r = sw::universal::decimal_to_binary::convert<BigBits>(scan, target_bits);
 	if (!r.valid) return false;
 
 	if (r.is_zero) {
@@ -1337,7 +1462,7 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	std::int64_t binary_scale = r.binary_scale;
 	bool round_up = r.guard_bit && (r.sticky_bit || mantissa.at(0));
 	if (round_up) {
-		using Big = sw::universal::decimal_to_binary::big_integer<>;
+		using Big = sw::universal::decimal_to_binary::big_integer<BigBits>;
 		mantissa += Big(1);
 		if (mantissa.at(target_bits)) {
 			mantissa >>= 1;
@@ -1377,31 +1502,26 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 }
 
 // generate an efloat format ASCII format
+// forward reference: full decimal formatter, defined after the arithmetic
+// operators it relies on (see below).
+template<unsigned nlimbs>
+std::string to_string(const efloat<nlimbs>& value, std::streamsize precision, std::streamsize width,
+                      bool fixed, bool scientific, bool internal, bool left, bool showpos,
+                      bool uppercase, char fill);
+
 template<unsigned nlimbs>
 inline std::ostream& operator<<(std::ostream& ostr, const efloat<nlimbs>& rhs) {
-	// to make certain that setw and left/right operators work properly
-	// we need to transform the efloat into a string
-	std::stringstream ss;
-
-	if (rhs.isinf()) {
-		ss << (rhs.sign() == -1 ? "-inf" : "+inf");
-	}
-	else if (rhs.isqnan()) {
-		ss << "nan(qnan)";
-	}
-	else if (rhs.issnan()) {
-		ss << "nan(snan)";
-	}
-	else {
-		std::streamsize prec = ostr.precision();
-		std::streamsize width = ostr.width();
-		std::ios_base::fmtflags ff;
-		ff = ostr.flags();
-		ss.flags(ff);
-		ss << std::setw(width) << std::setprecision(prec) << "TBD";
-	}
-
-	return ostr << ss.str();
+	std::ios_base::fmtflags fmt = ostr.flags();
+	std::streamsize precision   = ostr.precision();
+	std::streamsize width       = ostr.width();
+	char fillChar               = ostr.fill();
+	bool showpos    = (fmt & std::ios_base::showpos)    != 0;
+	bool uppercase  = (fmt & std::ios_base::uppercase)  != 0;
+	bool fixed      = (fmt & std::ios_base::fixed)      != 0;
+	bool scientific = (fmt & std::ios_base::scientific) != 0;
+	bool internal   = (fmt & std::ios_base::internal)   != 0;
+	bool left       = (fmt & std::ios_base::left)       != 0;
+	return ostr << to_string(rhs, precision, width, fixed, scientific, internal, left, showpos, uppercase, fillChar);
 }
 
 // read an ASCII efloat format
@@ -1645,6 +1765,193 @@ inline efloat<nlimbs> operator*(double lhs, const efloat<nlimbs>& rhs) {
 template<unsigned nlimbs>
 inline efloat<nlimbs> operator/(double lhs, const efloat<nlimbs>& rhs) {
 	return operator/(efloat<nlimbs>(lhs), rhs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// decimal formatting (binary -> decimal string at arbitrary precision)
+///
+/// Ported from ereal's to_string/to_digits: digits are extracted one at a time
+/// using efloat's OWN arithmetic (scale to [1,10) via *10 / /10, then repeatedly
+/// take floor and multiply by 10). Accuracy is limited by the operand's working
+/// precision. (issue #1150)
+
+namespace efloat_detail {
+
+	// append a signed decimal exponent, minimum 2 digits (efloat's exponent range
+	// far exceeds double's, so 4+ digit exponents are reachable -- e.g. 1e1000).
+	inline void append_exponent(std::string& str, int e) {
+		str += (e < 0 ? '-' : '+');
+		std::string digits = std::to_string((e < 0) ? -e : e);
+		if (digits.size() < 2) digits.insert(0, 2u - digits.size(), '0');
+		str += digits;
+	}
+
+	// round the digit string in place, propagating a carry; bump *decimalPoint on overflow
+	inline void round_string(std::vector<char>& s, int precision, int* decimalPoint) {
+		int lastDigit = precision - 1;
+		if (s[static_cast<unsigned>(lastDigit)] >= '5') {
+			int i = precision - 2;
+			s[static_cast<unsigned>(i)]++;
+			while (i > 0 && s[static_cast<unsigned>(i)] > '9') {
+				s[static_cast<unsigned>(i)] -= 10;
+				s[static_cast<unsigned>(--i)]++;
+			}
+		}
+		if (s[0] > '9') {
+			for (int i = precision - 1; i >= 2; --i) s[static_cast<unsigned>(i)] = s[static_cast<unsigned>(i - 1)];
+			s[0u] = '1';
+			s[1u] = '0';
+			(*decimalPoint)++;
+		}
+	}
+
+	// generate `precision`+1 decimal digits of |value| into s, with the decimal
+	// exponent returned in `exponent` (value ~= 0.s[0]s[1]... * 10^(exponent+1),
+	// i.e. s[0] is the leading significant digit at 10^exponent).
+	template<unsigned nlimbs>
+	void to_digits(const efloat<nlimbs>& value, std::vector<char>& s, int& exponent, int precision) {
+		constexpr double log10_2 = 0.301029995663981;
+		if (value.iszero()) {
+			exponent = 0;
+			for (int i = 0; i < precision; ++i) s[static_cast<unsigned>(i)] = '0';
+			return;
+		}
+
+		// estimate the power-of-ten exponent from the binary scale, then correct
+		int e = static_cast<int>(log10_2 * static_cast<double>(value.scale()));
+
+		efloat<nlimbs> r(value); r.setsign(false);   // |value|
+		const efloat<nlimbs> ten(10.0), one(1.0);
+		if (e < 0)      { for (int k = 0; k < -e; ++k) r = r * ten; }
+		else if (e > 0) { for (int k = 0; k <  e; ++k) r = r / ten; }
+		if (r >= ten)     { r = r / ten; ++e; }
+		else if (r < one) { r = r * ten; --e; }
+
+		const int nrDigits = precision + 1;
+		for (int i = 0; i < nrDigits; ++i) {
+			if (r.iszero()) { for (int j = i; j < nrDigits; ++j) s[static_cast<unsigned>(j)] = '0'; break; }
+			int digit = static_cast<int>(double(r));           // r in [0,10): leading digit
+			r = r - efloat<nlimbs>(static_cast<double>(digit));
+			r = r * ten;
+			s[static_cast<unsigned>(i)] = static_cast<char>(digit + '0');
+		}
+
+		// repair any digit that fell just outside [0,9] from rounding
+		for (int i = nrDigits - 1; i > 0; --i) {
+			if (s[static_cast<unsigned>(i)] < '0')      { s[static_cast<unsigned>(i - 1)]--; s[static_cast<unsigned>(i)] += 10; }
+			else if (s[static_cast<unsigned>(i)] > '9') { s[static_cast<unsigned>(i - 1)]++; s[static_cast<unsigned>(i)] -= 10; }
+		}
+
+		// round to `precision` digits, propagate carry
+		int lastDigit = nrDigits - 1;
+		if (s[static_cast<unsigned>(lastDigit)] >= '5') {
+			int i = nrDigits - 2;
+			s[static_cast<unsigned>(i)]++;
+			while (i > 0 && s[static_cast<unsigned>(i)] > '9') {
+				s[static_cast<unsigned>(i)] -= 10;
+				s[static_cast<unsigned>(--i)]++;
+			}
+		}
+		if (s[0] > '9') {   // carry made the leading digit 10 -> shift
+			++e;
+			for (int i = precision; i >= 2; --i) s[static_cast<unsigned>(i)] = s[static_cast<unsigned>(i - 1)];
+			s[0u] = '1';
+			s[1u] = '0';
+		}
+		s[static_cast<unsigned>(precision)] = 0;
+		exponent = e;
+	}
+
+}  // namespace efloat_detail
+
+template<unsigned nlimbs>
+std::string to_string(const efloat<nlimbs>& value, std::streamsize precision, std::streamsize width,
+                      bool fixed, bool scientific, bool internal, bool left, bool showpos,
+                      bool uppercase, char fill) {
+	std::string s;
+	if (fixed && scientific) fixed = false;   // scientific takes precedence
+	if (precision < 0) precision = 6;         // default stream precision
+
+	bool negative = (value.sign() == -1);   // sign(), not isneg(): isneg() is false for -inf
+
+	if (value.isnan()) {
+		s = uppercase ? "NAN" : "nan";
+	}
+	else {
+		if (negative) s += '-'; else if (showpos) s += '+';
+
+		if (value.isinf()) {
+			s += uppercase ? "INF" : "inf";
+		}
+		else if (value.iszero()) {
+			s += '0';
+			if (precision > 0) { s += '.'; s.append(static_cast<unsigned>(precision), '0'); }
+			if (!fixed) s += (uppercase ? "E+00" : "e+00");
+		}
+		else {
+			int e               = 0;   // decimal exponent, filled in by to_digits below
+			int powerOfTenScale = static_cast<int>(std::floor(static_cast<double>(value.scale()) * 0.301029995663981));
+			int integerDigits   = (fixed ? (powerOfTenScale + 1) : 1);
+			int nrDigits        = integerDigits + static_cast<int>(precision);
+
+			int minBuffer = static_cast<int>(nlimbs) * 16;
+			int nrDigitsForFixedFormat = fixed ? std::max(minBuffer, nrDigits) : nrDigits;
+
+			double fullMagnitude = std::fabs(static_cast<double>(value));
+			if (fixed && (precision == 0) && (fullMagnitude < 1.0)) {
+				s += (fullMagnitude >= 0.5) ? '1' : '0';
+			}
+			else if (fixed && nrDigits <= 0) {
+				s += '0';
+				if (precision > 0) { s += '.'; s.append(static_cast<unsigned>(precision), '0'); }
+			}
+			else {
+				std::vector<char> t;
+				if (fixed) {
+					// compute extra guard digits (nrDigitsForFixedFormat) for accuracy,
+					// but round and print exactly nrDigits (= integerDigits + precision).
+					t.resize(static_cast<size_t>(nrDigitsForFixedFormat + 1));
+					efloat_detail::to_digits(value, t, e, nrDigitsForFixedFormat);
+					efloat_detail::round_string(t, nrDigits + 1, &integerDigits);
+					if (integerDigits > 0) {
+						int i;
+						for (i = 0; i < integerDigits; ++i) s += t[static_cast<unsigned>(i)];
+						if (precision > 0) {
+							s += '.';
+							for (int j = 0; j < static_cast<int>(precision); ++j, ++i) s += t[static_cast<unsigned>(i)];
+						}
+					}
+					else {
+						s += "0.";
+						if (integerDigits < 0) s.append(static_cast<size_t>(-integerDigits), '0');
+						for (int i = 0; i < nrDigits; ++i) s += t[static_cast<unsigned>(i)];
+					}
+				}
+				else {
+					t.resize(static_cast<size_t>(nrDigits + 1));
+					efloat_detail::to_digits(value, t, e, nrDigits);
+					s += t[0ull];
+					if (precision > 0) s += '.';
+					for (int i = 1; i <= static_cast<int>(precision); ++i) s += t[static_cast<unsigned>(i)];
+				}
+			}
+
+			if (!fixed) { s += (uppercase ? 'E' : 'e'); efloat_detail::append_exponent(s, e); }
+		}
+	}
+
+	// width / fill padding
+	size_t strLength = s.length();
+	if (width > 0 && strLength < static_cast<size_t>(width)) {
+		size_t pad = static_cast<size_t>(width) - strLength;
+		if (internal) {
+			const bool hasSign = !s.empty() && (s[0] == '-' || s[0] == '+');
+			s.insert(hasSign ? std::string::size_type(1) : std::string::size_type(0), pad, fill);
+		}
+		else if (left) s.append(pad, fill);
+		else s.insert(std::string::size_type(0), pad, fill);
+	}
+	return s;
 }
 
 }} // namespace sw::universal
