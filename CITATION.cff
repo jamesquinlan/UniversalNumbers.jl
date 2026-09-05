@@ -6,7 +6,7 @@ abstract: >-
   Julia bindings to the Stillwater Universal C++ library, exposing posits,
   classic floats (cfloat), logarithmic number systems, takums, fixed-point,
   IBM hexadecimal floats, decimal floats, bfloat16, and double-double as
-  first-class AbstractFloat types under one consistent interface.
+  AbstractFloat types under one consistent interface.
 authors:
   - family-names: Quinlan
     given-names: James
@@ -19,17 +19,17 @@ authors:
 repository-code: "https://github.com/jamesquinlan/UniversalNumbers.jl"
 url: "https://github.com/jamesquinlan/UniversalNumbers.jl"
 license: MIT
-version: 0.1.0
-date-released: "2026-06-29"
+version: 0.1.2
+date-released: "2026-07-20"
 keywords:
-  - Julia
   - computer arithmetic
-  - posit
-  - takum
+  - posits
+  - takums
   - floating-point
   - number systems
-  - reproducibility
+  - scientific computing
+  - mathematics 
+doi: 10.5281/zenodo.21456649
 # TODO (after publishing):
-#   - add `doi:` with the Zenodo DOI for this version, and/or
 #   - add a `preferred-citation:` block pointing at the JOSS paper so the
 #     "Cite this repository" button suggests the paper instead of the software.

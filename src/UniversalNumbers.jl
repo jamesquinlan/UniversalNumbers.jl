@@ -224,6 +224,16 @@ for (TypeSym, P1, P2, CPrefix, StorageT) in TYPE_REGISTRY
         @inline $(TU)(f::Real) = $T(Float64(f))
         $(TU)() = $T(0.0)
 
+        # Rational: mirror Base's AbstractFloat rational cast (rational.jl:162) so
+        # T(a//b) behaves like Float32(a//b) etc. Our promote_rule collapses
+        # promote_type(T,S) to T, so the division runs in T. Resolves the
+        # MethodError ambiguity with Base's method.
+        @inline function $T(x::Rational{S}) where {S}
+            P = promote_type($T, S)
+            convert($T, convert(P, x.num) / convert(P, x.den))::$T
+        end
+        @inline $(TU)(x::Rational{S}) where {S} = $T(x)
+
         @inline Base.Float64(x::$T) = $conv_f64
         @inline Base.Float32(x::$T) = Float32(Float64(x))
 
@@ -394,6 +404,16 @@ for (N, CPrefix, StorageT) in TAKUM_REGISTRY
         @inline $(TU)(f::Real) = $T(Float64(f))
         $(TU)() = $T(0.0)
 
+        # Rational: mirror Base's AbstractFloat rational cast (rational.jl:162) so
+        # T(a//b) behaves like Float32(a//b) etc. Our promote_rule collapses
+        # promote_type(T,S) to T, so the division runs in T. Resolves the
+        # MethodError ambiguity with Base's method.
+        @inline function $T(x::Rational{S}) where {S}
+            P = promote_type($T, S)
+            convert($T, convert(P, x.num) / convert(P, x.den))::$T
+        end
+        @inline $(TU)(x::Rational{S}) where {S} = $T(x)
+
         @inline Base.Float64(x::$T) = $conv_f64
         @inline Base.Float32(x::$T) = Float32(Float64(x))
 
@@ -507,6 +527,12 @@ let CPrefix = "bfloat16"
         end
         BF16() = BF16(0.0)
 
+        # Rational cast mirroring Base rational.jl:162.
+        @inline function BF16(x::Rational{S}) where {S}
+            P = promote_type(BF16, S)
+            convert(BF16, convert(P, x.num) / convert(P, x.den))::BF16
+        end
+
         @inline Base.Float64(x::BF16) =
             ccall(get_sym(Symbol($(CPrefix * "_to_double"))), Float64, (UInt16,), x.data)
         @inline Base.Float32(x::BF16) = Float32(Float64(x))
@@ -593,6 +619,13 @@ let CPrefix = "dd"
             DD(val, true)
         end
         DD() = DD(0.0)
+
+        # Rational cast mirroring Base rational.jl:162; P collapses to DD, so the
+        # ratio is computed at full double-double precision.
+        @inline function DD(x::Rational{S}) where {S}
+            P = promote_type(DD, S)
+            convert(DD, convert(P, x.num) / convert(P, x.den))::DD
+        end
 
         @inline Base.Float64(x::DD) =
             ccall(get_sym(Symbol($(CPrefix * "_to_double"))), Float64, (UInt128,), x.data)

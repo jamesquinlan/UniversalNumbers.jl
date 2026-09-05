@@ -1,0 +1,100 @@
+#pragma once
+// manipulators.hpp: type identification, rendering, and stream I/O for elreal.
+//
+// Copyright (C) 2017 Stillwater Supercomputing, Inc.
+// SPDX-License-Identifier: MIT
+//
+// This file is part of the universal numbers project, which is released under an MIT Open Source license.
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <universal/number/elreal/elreal_fwd.hpp>
+#include <universal/number/elreal/elreal_impl.hpp>
+#include <universal/number/elreal/block_manipulators.hpp>   // to_binary(block) / to_hex(block)
+#include <universal/traits/elreal_traits.hpp>
+
+namespace sw { namespace universal {
+
+// type_tag: a human-readable identifier (host type).
+template <typename FpType>
+inline std::string type_tag(const elreal<FpType>& = {}) {
+    std::string host = "double";
+    if (sizeof(FpType) == sizeof(float)) host = "float";
+    return std::string("elreal<") + host + ">";
+}
+
+// to_components: the block expansion v ~ sum_i (block_i), each block's value, at the
+// value's current precision. A non-empty stream renders down to precision() blocks.
+// nonfinite_tag: "nan" / "inf" / "-inf". With include_sign=false the inf is
+// unsigned ("inf") -- for renderings like to_triple that carry the sign separately.
+template <typename FpType>
+inline std::string nonfinite_tag(const elreal<FpType>& v, bool include_sign = true) {
+    if (v.isnan()) return "nan";
+    if (!include_sign) return "inf";
+    return v.sign() < 0 ? "-inf" : "inf";
+}
+
+template <typename FpType>
+inline std::string to_components(const elreal<FpType>& v) {
+    if (!v.isfinite()) return std::string("( ") + nonfinite_tag(v) + " )";
+    std::stringstream s;
+    auto blocks = v.limbs(v.precision());
+    s << "( ";
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        s << std::setprecision(17) << blocks[i].template value_as<double>();
+        if (i + 1 < blocks.size()) s << ", ";
+    }
+    if (blocks.empty()) s << "0";
+    s << " )";
+    return s.str();
+}
+
+// to_binary: the leading (and, if multi-block, trailing) block in binary.
+template <typename FpType>
+inline std::string to_binary(const elreal<FpType>& v, bool nibbleMarker = false) {
+    if (!v.isfinite()) return nonfinite_tag(v);
+    std::stringstream s;
+    auto blocks = v.limbs(v.precision());
+    if (blocks.empty()) { s << "0"; return s.str(); }
+    s << to_binary(blocks.front(), nibbleMarker);
+    if (blocks.size() > 1) s << " ... " << to_binary(blocks.back(), nibbleMarker);
+    return s.str();
+}
+
+// to_triple: (sign, scale, significand) of the value, so that
+// value ~ (sign) significand * 2^scale with significand in [1,2) (0 for zero).
+template <typename FpType>
+inline std::string to_triple(const elreal<FpType>& v) {
+    if (!v.isfinite()) return std::string("(") + (v.isneg() ? "-, " : "+, ") + nonfinite_tag(v, false) + ')';
+    std::stringstream s;
+    const int64_t e = v.scale();
+    const double  m = v.iszero() ? 0.0
+                    : std::ldexp(v.template approx<double>(2), -static_cast<int>(e));
+    s << (v.isneg() ? "(-, " : "(+, ") << e << ", "
+      << std::setprecision(17) << m << ')';
+    return s.str();
+}
+
+// stream output: the value at its current precision as a host-double approximation.
+// (A full high-precision decimal printer is tracked as later manipulators work.)
+template <typename FpType>
+inline std::ostream& operator<<(std::ostream& ostr, const elreal<FpType>& v) {
+    return ostr << static_cast<double>(v);
+}
+
+// stream input: parse a host-double literal into an elreal (exact for values a
+// double represents exactly; otherwise the nearest double).
+template <typename FpType>
+inline std::istream& operator>>(std::istream& istr, elreal<FpType>& v) {
+    double d{};
+    istr >> d;
+    if (!istr.fail()) v = d;
+    return istr;
+}
+
+}} // namespace sw::universal

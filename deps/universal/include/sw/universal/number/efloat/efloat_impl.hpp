@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: MIT
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
+#include <cmath>      // std::fpclassify, std::frexp, std::ldexp (long double conversions)
 #include <string>
 #include <sstream>
 #include <iostream>
@@ -29,8 +30,63 @@ Compile-time configuration flags are used to select the exception mode.
 The exception types are defined, but you have the option to throw them
 */
 #include <universal/number/efloat/exceptions.hpp>
+#include <universal/behavior/rounding.hpp>
+#include <universal/behavior/status_flags.hpp>
 
 namespace sw { namespace universal {
+
+// =============================================================================
+// Architectural Design Note on Rounding Modes (Issue #1091)
+// =============================================================================
+// The Universal Number Library implements efloat's rounding mode as a dynamic
+// thread_local variable rather than a compile-time template parameter.
+// This choice was made based on several key architectural and standard tenets:
+//
+// 1. IEEE-754 & MPFR Conformance:
+//    The IEEE-754 standard and mature arbitrary-precision libraries like MPFR
+//    model the rounding mode as a dynamic thread-local or global environment state
+//    (analogous to the FPU control word managed via `fesetround()`). This allows
+//    a single library body or compiled algorithm to execute under different
+//    rounding modes without requiring code modification or separate compiles.
+//
+// 2. Runtime Flexibility & Numerical Analysis:
+//    A thread_local runtime state allows developers to dynamically manipulate
+//    the rounding behavior during execution, which is a prerequisite for:
+//    - Interval Arithmetic: Dynamically toggling between RoundTowardPositive 
+//      and RoundTowardNegative to compute strict upper and lower bounds.
+//    - Sensitivity Analysis: Evaluating the same numeric algorithm under different
+//      rounding modes to measure cumulative error and stability without recompilation.
+//
+// 3. Avoiding Type-System Proliferation:
+//    If the rounding mode were a compile-time template parameter (e.g.,
+//    efloat<nlimbs, Mode>), then efloat<16, RoundToNearest> and efloat<16, RoundToZero>
+//    would be completely distinct C++ types. This would cause type-system
+//    proliferation, complicate type-promotion rules, and require extensive
+//    mixed-type operator overloading for every rounding mode permutation
+//    (e.g., resolving the result type of adding a RoundToNearest to a RoundToZero).
+//
+// While a template parameter approach offers compile-time branch pruning (via
+// `if constexpr`), the thread_local approach maximizes runtime utility, type
+// safety, and compliance with established numeric standards.
+// =============================================================================
+
+inline thread_local RoundingMode efloat_rounding_mode = RoundingMode::RoundToNearest;
+
+inline thread_local unsigned efloat_default_precision_bits = 0;
+
+inline unsigned get_default_precision() noexcept { return efloat_default_precision_bits; }
+inline void set_default_precision(unsigned bits) noexcept { efloat_default_precision_bits = bits; }
+
+static inline constexpr int clz(uint32_t x) noexcept {
+	if (x == 0) return 32;
+	int n = 0;
+	if (x <= 0x0000FFFF) { n += 16; x <<= 16; }
+	if (x <= 0x00FFFFFF) { n += 8;  x <<= 8;  }
+	if (x <= 0x0FFFFFFF) { n += 4;  x <<= 4;  }
+	if (x <= 0x3FFFFFFF) { n += 2;  x <<= 2;  }
+	if (x <= 0x7FFFFFFF) { n += 1;            }
+	return n;
+}
 
 enum class FloatingPointState {
 	Zero,
@@ -56,11 +112,12 @@ public:
 	// "_limb has one element of value 0" representation for callers that
 	// inspect bits()/significant().  Sign-only and state-only selectors
 	// and modifiers operate purely on the trivial members and are
-	// constexpr-clean.  Compound arithmetic and free comparison operators
-	// are currently stubs (returning *this or a constant) and are
-	// therefore promoted to constexpr too -- the surface lights up at
-	// constant evaluation today, and real arithmetic semantics will
-	// inherit constexpr automatically when implemented.
+	// constexpr-clean.  Compound arithmetic and the free comparison
+	// operators are fully implemented and used at runtime; they still
+	// carry the constexpr specifier for a uniform interface, but because
+	// they operate on the heap-allocated _limb expansion they escape
+	// constant evaluation (the same #747 transient-allocation limit) and
+	// so cannot be exercised in a constant expression.
 	// Out of scope (heap-escape boundary): native-type ctors / operator=
 	// (convert_ieee754 calls std::fpclassify which is not constexpr in
 	// C++20), conversion-out (std::pow), parse() (std::regex).
@@ -68,6 +125,7 @@ public:
 		: _state{ FloatingPointState::Zero }, _sign{ false }, _exponent{ 0 }, _limb{} {
 		if (!std::is_constant_evaluated()) {
 			_limb.push_back(0);
+			_precision_limbs = (efloat_default_precision_bits > 0) ? std::max(1u, (efloat_default_precision_bits + 31) / 32) : nlimbs;
 		}
 	}
 
@@ -76,6 +134,20 @@ public:
 
 	constexpr efloat& operator=(const efloat&) = default;
 	constexpr efloat& operator=(efloat&&) = default;
+
+	// specialized constructor for testing and verification
+	constexpr efloat(bool sign, int64_t exponent, const std::vector<uint32_t>& limbs, bool nan = false, bool inf = false, bool zero = false) {
+		_sign = sign;
+		_exponent = exponent;
+		_limb = limbs;
+		if (nan) _state = FloatingPointState::QuietNaN;
+		else if (inf) _state = FloatingPointState::Infinite;
+		else if (zero) _state = FloatingPointState::Zero;
+		else _state = FloatingPointState::Normal;
+		if (!std::is_constant_evaluated()) {
+			_precision_limbs = (efloat_default_precision_bits > 0) ? std::max(1u, (efloat_default_precision_bits + 31) / 32) : nlimbs;
+		}
+	}
 
 	// initializers for native types
 	efloat(signed char iv)                      noexcept { *this = iv; }
@@ -111,46 +183,319 @@ public:
 
 #if LONG_DOUBLE_SUPPORT
 	efloat(long double iv)                      noexcept { *this = iv; }
-	efloat& operator=(long double rhs)          noexcept { return convert_ieee754(rhs); }
-	explicit operator long double()       const noexcept { return convert_to_ieee754<long double>(); }
-#endif 
+
+	// convert_ieee754 only builds limbs for sizeof(Real) of 4 or 8, so a wide
+	// long double (sizeof 16 on x86-64) produced 0. Decompose instead: frexp the
+	// value into m * 2^e with m in [0.5,1) (safely inside double's range), split m
+	// into an exact sum of doubles via the working double path, then apply e with
+	// setexponent(). This preserves the full long double significand AND its
+	// extended exponent range. Platforms where long double == double take the
+	// direct path.
+	efloat& operator=(long double rhs) noexcept {
+		if constexpr (sizeof(long double) <= sizeof(double)) {
+			return convert_ieee754(static_cast<double>(rhs));
+		}
+		else {
+			switch (std::fpclassify(rhs)) {
+			case FP_ZERO:
+			case FP_NAN:
+			case FP_INFINITE:
+				return convert_ieee754(static_cast<double>(rhs));
+			default:
+				break;
+			}
+			int e = 0;
+			long double m = std::frexp(rhs, &e);
+			clear();
+			long double r = m;
+			for (int i = 0; i < 8 && r != 0.0L; ++i) {
+				double hi = static_cast<double>(r);
+				if (hi == 0.0) break;   // remainder fell below double's range
+				*this += efloat(hi);
+				r -= static_cast<long double>(hi);
+			}
+			if (!iszero()) setexponent(scale() + e);
+			return *this;
+		}
+	}
+
+	explicit operator long double() const noexcept {
+		if constexpr (sizeof(long double) <= sizeof(double)) {
+			return static_cast<long double>(convert_to_ieee754<double>());
+		}
+		else {
+			switch (_state) {
+			case FloatingPointState::Zero:         return _sign ? -0.0L : 0.0L;
+			case FloatingPointState::QuietNaN:
+			case FloatingPointState::SignalingNaN: return std::numeric_limits<long double>::quiet_NaN();
+			case FloatingPointState::Infinite:     return _sign ? -std::numeric_limits<long double>::infinity()
+			                                                     :  std::numeric_limits<long double>::infinity();
+			case FloatingPointState::Normal:
+			default:
+				break;
+			}
+			// bring |x| into [1,2), extract as an exact sum of doubles, then scale
+			// by the true (wide) exponent -- the dual of the assignment above.
+			const std::int64_t k = scale();
+			efloat n(*this);
+			n.setsign(false);
+			n.setexponent(0);
+			long double s = 0.0L;
+			efloat r(n);
+			for (int i = 0; i < 4 && !r.iszero(); ++i) {
+				double hi = static_cast<double>(r);
+				if (hi == 0.0) break;
+				s += static_cast<long double>(hi);
+				r -= efloat(hi);
+			}
+			if (_sign) s = -s;
+			return std::ldexp(s, static_cast<int>(k));
+		}
+	}
+#endif
+
+	// instance precision management
+	unsigned get_precision() const noexcept { return _precision_limbs * 32; }
+	void set_precision(unsigned bits) noexcept { _precision_limbs = std::max(1u, (bits + 31) / 32); normalize(); }
 
 	// prefix operators
 	constexpr efloat operator-() const noexcept {
+		if (iszero()) return *this;
 		efloat negated(*this);
+		negated.setsign(!_sign);
 		return negated;
 	}
 
-	// arithmetic operators (currently stubs; constexpr-marked so the
-	// surface lights up at constant evaluation today and real semantics
-	// will inherit constexpr-ness automatically when implemented)
-	constexpr efloat& operator+=(const efloat& /* rhs */) noexcept {
+	// arithmetic operators
+	constexpr efloat& operator+=(const efloat& rhs) noexcept {
+		// handle special cases
+		if (isnan() || rhs.isnan()) {
+			setnan();
+			return *this;
+		}
+		if (isinf()) {
+			if (rhs.isinf() && _sign != rhs._sign) {
+				setnan();
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::InvalidOperation);
+				}
+			}
+			return *this;
+		}
+		if (rhs.isinf()) {
+			*this = rhs;
+			return *this;
+		}
+		if (iszero()) {
+			*this = rhs;
+			return *this;
+		}
+		if (rhs.iszero()) {
+			return *this;
+		}
+
+		// Make copies for manipulation
+		_precision_limbs = std::max(_precision_limbs, rhs._precision_limbs);
+		unsigned target_prec = _precision_limbs;
+
+		std::vector<uint32_t> a_limbs = _limb;
+		std::vector<uint32_t> b_limbs = rhs._limb;
+		int64_t a_exp = _exponent;
+		int64_t b_exp = rhs._exponent;
+		
+		// Align exponents
+		if (a_exp < b_exp) {
+			grow_for_shift(a_limbs, b_exp - a_exp, target_prec);
+			shift_right(a_limbs, b_exp - a_exp);
+			a_exp = b_exp;
+		} else if (b_exp < a_exp) {
+			grow_for_shift(b_limbs, a_exp - b_exp, target_prec);
+			shift_right(b_limbs, a_exp - b_exp);
+		}
+
+		// Align sizes before any operation
+		align_sizes(a_limbs, b_limbs);
+
+		if (_sign == rhs._sign) {
+			size_t old_size = a_limbs.size();
+			add_limbs(a_limbs, b_limbs);
+			if (a_limbs.size() > old_size) {
+				a_exp += 32 * (a_limbs.size() - old_size);
+			}
+			_limb = a_limbs;
+		} else {
+			// Signs differ, perform subtraction
+			int cmp = compare_limbs(a_limbs, b_limbs);
+			if (cmp == 0) {
+				setzero();
+				return *this;
+			}
+			if (cmp > 0) {
+				subtract_limbs(a_limbs, b_limbs);
+				_limb = a_limbs;
+				// sign is already correct
+			} else { // cmp < 0
+				subtract_limbs(b_limbs, a_limbs);
+				_limb = b_limbs;
+				_sign = rhs._sign;
+			}
+		}
+
+		_exponent = a_exp;
+		normalize();
+
 		return *this;
 	}
-	constexpr efloat& operator+=(double /* rhs */) noexcept {
+	constexpr efloat& operator+=(double rhs) noexcept {
+		return *this += efloat(rhs);
+	}
+	constexpr efloat& operator-=(const efloat& rhs) noexcept {
+		*this += -rhs;
 		return *this;
 	}
-	constexpr efloat& operator-=(const efloat& /* rhs */) noexcept {
-		return *this;
+	constexpr efloat& operator-=(double rhs) noexcept {
+		return *this -= efloat(rhs);
 	}
-	constexpr efloat& operator-=(double /* rhs */) noexcept {
+	constexpr efloat& operator*=(const efloat& rhs) noexcept {
+		_precision_limbs = std::max(_precision_limbs, rhs._precision_limbs);
+		if (isnan() || rhs.isnan()) {
+			setnan();
+			return *this;
+		}
+		if (isinf()) {
+			if (rhs.iszero()) {
+				setnan();
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::InvalidOperation);
+				}
+			} else {
+				_sign = (_sign != rhs._sign);
+			}
+			return *this;
+		}
+		if (rhs.isinf()) {
+			if (iszero()) {
+				setnan();
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::InvalidOperation);
+				}
+			} else {
+				*this = rhs;
+				_sign = (_sign != rhs._sign);
+			}
+			return *this;
+		}
+		if (iszero() || rhs.iszero()) {
+			setzero();
+			_sign = (_sign != rhs._sign);
+			return *this;
+		}
+
+		// Optimization: if either operand is a power of 2, bypass long multiplication
+		if (rhs._limb.size() == 1 && rhs._limb[0] == 0x80000000) {
+			_exponent += rhs._exponent;
+			_sign = (_sign != rhs._sign);
+			return *this;
+		}
+		if (_limb.size() == 1 && _limb[0] == 0x80000000) {
+			unsigned target_prec = _precision_limbs;
+			int64_t old_exp = _exponent;
+			bool original_sign = _sign;
+			*this = rhs;
+			_precision_limbs = target_prec;
+			_exponent += old_exp;
+			_sign = (original_sign != rhs._sign);
+			return *this;
+		}
+
+		std::vector<uint32_t> product;
+		multiply_limbs(product, _limb, rhs._limb);
+
+		_limb = product;
+		_exponent = _exponent + rhs._exponent + 1;
+		_sign = (_sign != rhs._sign);
+
+		normalize();
 		return *this;
-	}
-	constexpr efloat& operator*=(const efloat& /* rhs */) noexcept {
+		}
+		constexpr efloat& operator*=(double rhs) noexcept {
+		return *this *= efloat(rhs);
+		}
+		constexpr efloat& operator/=(const efloat& rhs) noexcept {
+		_precision_limbs = std::max(_precision_limbs, rhs._precision_limbs);
+		if (isnan() || rhs.isnan()) {
+			setnan();
+			return *this;
+		}
+		if (rhs.iszero()) {
+			if (iszero()) {
+				setnan();
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::InvalidOperation);
+				}
+			} else {
+				setinf(_sign != rhs._sign);
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::DivisionByZero);
+				}
+			}
+			return *this;
+		}
+		if (iszero()) {
+			return *this; // 0 / finite = 0
+		}
+		if (isinf()) {
+			if (rhs.isinf()) {
+				setnan();
+				if (!std::is_constant_evaluated()) {
+					efloat_exception_flags.set(ExceptionFlag::InvalidOperation);
+				}
+			} else {
+				_sign = (_sign != rhs._sign);
+			}
+			return *this;
+		}
+		if (rhs.isinf()) {
+			setzero(); // finite / inf = 0
+			_sign = (_sign != rhs._sign);
+			return *this;
+		}
+
+		// Optimization: if rhs is a power of 2, bypass division
+		if (rhs._limb.size() == 1 && rhs._limb[0] == 0x80000000) {
+			_exponent -= rhs._exponent;
+			_sign = (_sign != rhs._sign);
+			return *this;
+		}
+
+		std::vector<uint32_t> quotient;
+		bool remainder_non_zero = false;
+		const bool result_sign = (_sign != rhs._sign);
+		divide_limbs(quotient, _limb, rhs._limb, _precision_limbs + 1, remainder_non_zero); // generate _precision_limbs + 1 limbs
+
+		if (round_limbs(quotient, _precision_limbs, efloat_rounding_mode, result_sign, remainder_non_zero)) {
+			quotient.insert(quotient.begin(), 1u);
+			_exponent += 32;
+		}
+
+		_limb = quotient;
+		_exponent = _exponent - rhs._exponent;
+		_sign = result_sign;
+
+		normalize();
 		return *this;
-	}
-	constexpr efloat& operator*=(double /* rhs */) noexcept {
-		return *this;
-	}
-	constexpr efloat& operator/=(const efloat& /* rhs */) noexcept {
-		return *this;
-	}
-	constexpr efloat& operator/=(double /* rhs */) noexcept {
-		return *this;
+		}
+	constexpr efloat& operator/=(double rhs) noexcept {
+		return *this /= efloat(rhs);
 	}
 
 	// modifiers
-	constexpr void clear() noexcept { _state = FloatingPointState::Normal;  _sign = false; _exponent = 0; _limb.clear(); }
+	constexpr void clear() noexcept {
+		_state = FloatingPointState::Normal;
+		_sign = false;
+		_exponent = 0;
+		_limb.clear();
+	}
 	constexpr void setzero() noexcept {
 		clear();
 		_state = FloatingPointState::Zero;
@@ -181,7 +526,8 @@ public:
 		_limb[i] = value;
 	}
 
-	efloat& assign(const std::string& /* txt */) {
+	efloat& assign(const std::string& txt) {
+		parse(txt, *this);
 		return *this;
 	}
 
@@ -235,36 +581,314 @@ public:
 	}
 	std::vector<uint32_t> bits() const { return _limb; }
 
+	constexpr void normalize() {
+		if (_state != FloatingPointState::Normal) {
+			return;
+		}
+
+		int msb_pos = -1;
+		for (size_t i = 0; i < _limb.size(); ++i) {
+			if (_limb[i] != 0) {
+				msb_pos = (_limb.size() - 1 - i) * 32 + (31 - clz(_limb[i]));
+				break;
+			}
+		}
+
+		if (msb_pos == -1) {
+			setzero();
+			return;
+		}
+
+		int64_t shift = (int64_t)(_limb.size() * 32 - 1) - msb_pos;
+		_exponent -= shift;
+
+		if (shift > 0) {
+			for(int64_t i = 0; i < shift; ++i) {
+				uint64_t carry = 0;
+				for(int j = static_cast<int>(_limb.size()) - 1; j >= 0; --j) {
+					uint64_t v = (uint64_t(_limb[j]) << 1) | carry;
+					_limb[j] = static_cast<uint32_t>(v);
+					carry = v >> 32;
+				}
+			}
+		} else if (shift < 0) {
+			shift_right(_limb, static_cast<unsigned>(-shift));
+		}
+
+		// Truncate trailing zero limbs at the LSB side (end of vector) to maintain minimal representation
+		while (_limb.size() > 1 && _limb.back() == 0) {
+			_limb.pop_back();
+		}
+
+		// Enforce precision limit and round
+		if (_limb.size() > _precision_limbs) {
+			if (round_limbs(_limb, _precision_limbs, efloat_rounding_mode, _sign)) {
+				_limb.insert(_limb.begin(), 1u);
+				_exponent += 32;
+			}
+			normalize(); // Recursive call to normalize the rounded/carried result
+		}
+	}
+
+	static constexpr int compare_limbs(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) noexcept {
+		size_t max_size = (a.size() > b.size() ? a.size() : b.size());
+		for (size_t i = 0; i < max_size; ++i) {
+			uint32_t val_a = (i < a.size() ? a[i] : 0u);
+			uint32_t val_b = (i < b.size() ? b[i] : 0u);
+			if (val_a > val_b) return 1;
+			if (val_b > val_a) return -1;
+		}
+		return 0;
+	}
+
 protected:
 	FloatingPointState    _state;    // exceptional state
 	bool                  _sign;     // sign of the number: -1 if true, +1 if false, zero is positive
 	int64_t               _exponent; // exponent of the number
 	std::vector<uint32_t> _limb;     // limbs of the representation
+	unsigned              _precision_limbs = nlimbs;
 
 	// HELPER methods
+
+	static constexpr void shift_right(std::vector<uint32_t>& limbs, unsigned k) noexcept {
+		if (k == 0) return;
+		if (k >= limbs.size() * 32) {
+			limbs.assign(1, 0u);
+			return;
+		}
+		const unsigned limb_shift = k / 32;
+		const unsigned bit_shift = k % 32;
+		
+		if (limb_shift > 0) {
+			// insert zeros at the MSB side (index 0)
+			limbs.insert(limbs.begin(), limb_shift, 0u);
+			// erase the LSBs that are shifted out (at the end)
+			limbs.resize(limbs.size() - limb_shift);
+		}
+
+		if (bit_shift > 0) {
+			uint32_t carry_mask = (1u << bit_shift) - 1;
+			uint32_t carry = 0;
+			for (size_t i = 0; i < limbs.size(); ++i) {
+				uint32_t next_carry = limbs[i] & carry_mask;
+				limbs[i] = (limbs[i] >> bit_shift) | (carry << (32 - bit_shift));
+				carry = next_carry;
+			}
+		}
+	}
+
+	static constexpr void grow_for_shift(std::vector<uint32_t>& limbs, unsigned k, unsigned max_limbs) noexcept {
+		const unsigned required_limbs = (k + 31) / 32;
+		if (limbs.size() < max_limbs && required_limbs > 0) {
+			unsigned growth = std::min(required_limbs, max_limbs - static_cast<unsigned>(limbs.size()));
+			if (growth > 0) {
+				limbs.resize(limbs.size() + growth, 0u); // appends zeros at the LSB side
+			}
+		}
+	}
+
+	static constexpr void align_sizes(std::vector<uint32_t>& a, std::vector<uint32_t>& b) noexcept {
+		size_t max_limbs = std::max(a.size(), b.size());
+		a.resize(max_limbs, 0u); // appends zeros at the LSB side
+		b.resize(max_limbs, 0u);
+	}
+
+	static constexpr void add_limbs(std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+		uint64_t carry = 0;
+		for (int i = static_cast<int>(a.size()) - 1; i >= 0; --i) {
+			uint64_t sum = uint64_t(a[i]) + uint64_t(b[i]) + carry;
+			a[i] = static_cast<uint32_t>(sum);
+			carry = sum >> 32;
+		}
+		if (carry) {
+			a.insert(a.begin(), 1u); // insert carry-out at index 0 (MSB side)
+		}
+	}
+
+	static constexpr void subtract_limbs(std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+		uint64_t borrow = 0;
+		for (int i = static_cast<int>(a.size()) - 1; i >= 0; --i) {
+			uint64_t diff = (uint64_t(1) << 32) + uint64_t(a[i]) - uint64_t(b[i]) - borrow;
+			a[i] = static_cast<uint32_t>(diff);
+			borrow = (diff >> 32) ? 0 : 1;
+		}
+	}
+
+	static constexpr void multiply_limbs(std::vector<uint32_t>& product, const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
+		std::vector<uint32_t> rev_a = a;
+		std::vector<uint32_t> rev_b = b;
+		std::reverse(rev_a.begin(), rev_a.end()); // converts to LSB-first
+		std::reverse(rev_b.begin(), rev_b.end());
+
+		size_t m = a.size();
+		size_t n = b.size();
+		std::vector<uint32_t> rev_product(m + n, 0u);
+
+		for (size_t i = 0; i < m; ++i) {
+			uint64_t carry = 0;
+			for (size_t j = 0; j < n; ++j) {
+				uint64_t sum = uint64_t(rev_product[i + j]) + uint64_t(rev_a[i]) * uint64_t(rev_b[j]) + carry;
+				rev_product[i + j] = static_cast<uint32_t>(sum);
+				carry = sum >> 32;
+			}
+			rev_product[i + n] = static_cast<uint32_t>(carry);
+		}
+
+		std::reverse(rev_product.begin(), rev_product.end()); // converts back to MSB-first
+		product = rev_product;
+	}
+
+	static constexpr bool round_limbs(std::vector<uint32_t>& limbs, size_t target_size, RoundingMode mode, bool sign, bool sticky_remainder = false) noexcept {
+		if (limbs.size() <= target_size) return false;
+
+		bool guard = (limbs[target_size] & 0x80000000) != 0;
+		bool lsb = (limbs[target_size - 1] & 1) != 0;
+		bool sticky = sticky_remainder || ((limbs[target_size] & 0x7FFFFFFF) != 0);
+		for (size_t i = target_size + 1; i < limbs.size(); ++i) {
+			if (limbs[i] != 0) {
+				sticky = true;
+				break;
+			}
+		}
+
+		if (guard || sticky) {
+			if (!std::is_constant_evaluated()) {
+				efloat_exception_flags.set(ExceptionFlag::Inexact);
+			}
+		}
+
+		bool round_up = false;
+		switch (mode) {
+		case RoundingMode::RoundToNearest:
+			if (guard) {
+				if (sticky || lsb) {
+					round_up = true;
+				}
+			}
+			break;
+		case RoundingMode::RoundToZero:
+			break;
+		case RoundingMode::RoundTowardPositive:
+			if (!sign && (guard || sticky)) {
+				round_up = true;
+			}
+			break;
+		case RoundingMode::RoundTowardNegative:
+			if (sign && (guard || sticky)) {
+				round_up = true;
+			}
+			break;
+		}
+
+		limbs.resize(target_size);
+
+		if (round_up) {
+			uint64_t carry = 1;
+			for (int i = static_cast<int>(target_size) - 1; i >= 0; --i) {
+				uint64_t sum = uint64_t(limbs[i]) + carry;
+				limbs[i] = static_cast<uint32_t>(sum);
+				carry = sum >> 32;
+				if (!carry) break;
+			}
+			if (carry) {
+				return true; // carry-out occurred during rounding!
+			}
+		}
+		return false;
+	}
+
+	static constexpr void divide_limbs(std::vector<uint32_t>& quotient, const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, unsigned max_limbs, bool& remainder_non_zero) {
+		quotient.assign(max_limbs, 0u);
+		std::vector<uint32_t> div = b;
+		std::vector<uint32_t> dvd = a;
+		align_sizes(dvd, div);
+
+		// Insert leading zero limb to prevent shift overflow bit-loss!
+		dvd.insert(dvd.begin(), 0u);
+		div.insert(div.begin(), 0u);
+		remainder_non_zero = false;
+
+		for (unsigned bit = 0; bit < max_limbs * 32; ++bit) {
+			if (compare_limbs(dvd, div) >= 0) {
+				// Set bit in quotient
+				unsigned limb_idx = bit / 32;
+				unsigned bit_idx = 31 - (bit % 32);
+				quotient[limb_idx] |= (1u << bit_idx);
+				subtract_limbs(dvd, div);
+			}
+			// Shift dividend left by 1 bit
+			uint64_t carry = 0;
+			for (int j = static_cast<int>(dvd.size()) - 1; j >= 0; --j) {
+				uint64_t v = (uint64_t(dvd[j]) << 1) | carry;
+				dvd[j] = static_cast<uint32_t>(v);
+				carry = v >> 32;
+			}
+			remainder_non_zero = remainder_non_zero || (carry != 0);
+		}
+		// check if there are any non-zero bits left in dvd (remainder)
+		if (!remainder_non_zero) {
+			for (size_t i = 0; i < dvd.size(); ++i) {
+				if (dvd[i] != 0) {
+					remainder_non_zero = true;
+					break;
+				}
+			}
+		}
+	}
+
 
 	// convert arithmetic types into an elastic floating-point
 	template<typename SignedInt,
 		typename = typename std::enable_if< std::is_integral<SignedInt>::value, SignedInt >::type>
 	efloat& convert_signed(SignedInt v) noexcept {
+		clear();
 		if (0 == v) {
 			setzero();
+			return *this;
 		}
-		else {
+		bool neg = (v < 0);
+		uint64_t magnitude = neg
+			? (0ull - static_cast<uint64_t>(static_cast<int64_t>(v)))
+			: static_cast<uint64_t>(v);
 
+		uint32_t high = static_cast<uint32_t>(magnitude >> 32);
+		uint32_t low = static_cast<uint32_t>(magnitude & 0xFFFFFFFFu);
+
+		_state = FloatingPointState::Normal;
+		_sign = neg;
+		if (high != 0) {
+			_limb = { high, low };
+			_exponent = 63;
+		} else {
+			_limb = { low };
+			_exponent = 31;
 		}
+		normalize();
 		return *this;
 	}
 
 	template<typename UnsignedInt,
 		typename = typename std::enable_if< std::is_integral<UnsignedInt>::value, UnsignedInt >::type>
 	efloat& convert_unsigned(UnsignedInt v) noexcept {
+		clear();
 		if (0 == v) {
 			setzero();
+			return *this;
 		}
-		else {
+		uint64_t magnitude = static_cast<uint64_t>(v);
+		uint32_t high = static_cast<uint32_t>(magnitude >> 32);
+		uint32_t low = static_cast<uint32_t>(magnitude & 0xFFFFFFFFu);
 
+		_state = FloatingPointState::Normal;
+		_sign = false;
+		if (high != 0) {
+			_limb = { high, low };
+			_exponent = 63;
+		} else {
+			_limb = { low };
+			_exponent = 31;
 		}
+		normalize();
 		return *this;
 	}
 
@@ -277,12 +901,12 @@ protected:
 		switch (std::fpclassify(rhs)) {
 		case FP_ZERO:
 			_state = FloatingPointState::Zero;
-			_sign = false;
+			_sign = std::signbit(rhs);
 			_exponent = 0;
 			// stay limbless
 			return *this;
 		case FP_NAN:
-			_sign = sw::universal::sign(rhs);
+			_sign = std::signbit(rhs);
 			// x86 specific: the top bit of the significand = 1 for quiet, 0 for signaling
 			checkNaN(rhs, nan_type);
 			if (nan_type == NAN_TYPE_QUIET) {
@@ -296,7 +920,7 @@ protected:
 			return *this;
 		case FP_INFINITE:
 			_state = FloatingPointState::Infinite;
-			_sign = sw::universal::sign(rhs);
+			_sign = std::signbit(rhs);
 			_exponent = 0;
 			// stay limbless
 			return *this;
@@ -308,7 +932,7 @@ protected:
 			break;
 		}
 
-		_sign = sw::universal::sign(rhs);
+		_sign = std::signbit(rhs);
 		_exponent = sw::universal::scale(rhs); // scale already deals with subnormal numbers
 		if constexpr (sizeof(Real) == 4) {
 			std::uint32_t bits{ 0 };
@@ -346,6 +970,7 @@ protected:
 		else {
 			static_assert(true);
 		}
+		normalize(); // Ensure canonical, minimal representation (truncating trailing zeros)
 		return *this;
 	}
 
@@ -354,23 +979,300 @@ protected:
 	template<typename Real,
 		typename = typename std::enable_if< std::is_floating_point<Real>::value, Real >::type>
 	Real convert_to_ieee754() const noexcept {
-		Real v{ 0.0 };
 		switch (_state) {
 		case FloatingPointState::Zero:
-			break;
+			return (_sign ? -Real(0.0) : +Real(0.0));
 		case FloatingPointState::QuietNaN:
-			v = std::numeric_limits<Real>::quiet_NaN();
-			break;
+			return std::numeric_limits<Real>::quiet_NaN();
 		case FloatingPointState::SignalingNaN:
-			v = std::numeric_limits<Real>::signaling_NaN();
-			break;
+			return std::numeric_limits<Real>::signaling_NaN();
 		case FloatingPointState::Infinite:
-			v = (_sign ? -std::numeric_limits<Real>::infinity() : +std::numeric_limits<Real>::infinity());
-			break;
+			return (_sign ? -std::numeric_limits<Real>::infinity() : +std::numeric_limits<Real>::infinity());
 		case FloatingPointState::Normal:
-			v = Real(sign()) * std::pow(Real(2.0), Real(scale())) * Real(significant());
+			break;
 		}
-		return v;
+
+		if constexpr (std::is_same_v<Real, float>) {
+			constexpr unsigned S_bits = 1;
+			constexpr unsigned F_bits = 23;
+			constexpr unsigned E_bits = 8;
+			constexpr int E_max = 127;
+			constexpr int E_min = -126;
+			constexpr int E_bias = 127;
+			constexpr unsigned K = F_bits + 1; // 24
+			constexpr unsigned shift_amt = 64 - K; // 40
+
+			uint64_t raw_sig = 0;
+			if (_limb.size() >= 1) {
+				raw_sig |= (uint64_t(_limb[0]) << 32);
+			}
+			if (_limb.size() >= 2) {
+				raw_sig |= _limb[1];
+			}
+			bool sticky_limbs = false;
+			for (size_t i = 2; i < _limb.size(); ++i) {
+				if (_limb[i] != 0) {
+					sticky_limbs = true;
+					break;
+				}
+			}
+
+			int64_t exp = _exponent;
+			uint64_t sig = raw_sig;
+			unsigned eff_shift = shift_amt;
+			bool is_subnormal = (exp < E_min);
+
+			bool lsb = false;
+			bool guard = false;
+			bool sticky = false;
+
+			if (is_subnormal) {
+				int64_t sub_shift = E_min - exp;
+				if (sub_shift >= static_cast<int64_t>(K)) {
+					sig = 0;
+					eff_shift = 64;
+					sticky = sticky_limbs || (raw_sig != 0);
+					guard = false;
+					lsb = false;
+				} else {
+					eff_shift = shift_amt + static_cast<unsigned>(sub_shift);
+					lsb = (sig & (1ULL << eff_shift)) != 0;
+					guard = (sig & (1ULL << (eff_shift - 1))) != 0;
+					sticky = sticky_limbs || ((sig & ((1ULL << (eff_shift - 1)) - 1)) != 0);
+				}
+			} else {
+				lsb = (sig & (1ULL << shift_amt)) != 0;
+				guard = (sig & (1ULL << (shift_amt - 1))) != 0;
+				sticky = sticky_limbs || ((sig & ((1ULL << (shift_amt - 1)) - 1)) != 0);
+			}
+
+			if (guard || sticky) {
+				efloat_exception_flags.set(ExceptionFlag::Inexact);
+				if (is_subnormal) {
+					efloat_exception_flags.set(ExceptionFlag::Underflow);
+				}
+			}
+
+			bool round_up = false;
+			switch (efloat_rounding_mode) {
+			case RoundingMode::RoundToNearest:
+				if (guard && (sticky || lsb)) round_up = true;
+				break;
+			case RoundingMode::RoundToZero:
+				break;
+			case RoundingMode::RoundTowardPositive:
+				if (!_sign && (guard || sticky)) round_up = true;
+				break;
+			case RoundingMode::RoundTowardNegative:
+				if (_sign && (guard || sticky)) round_up = true;
+				break;
+			}
+
+			if (round_up) {
+				if (eff_shift >= 64) {
+					// Round up from full underflow to smallest subnormal
+					sig = (1ULL << 63);
+					exp = E_min;
+					is_subnormal = true;
+				} else {
+					uint64_t prev_sig = sig;
+					sig += (1ULL << eff_shift);
+					if (sig < prev_sig) {
+						if (is_subnormal) {
+							sig = (1ULL << 63);
+							exp = E_min;
+							is_subnormal = false;
+						} else {
+							sig = (1ULL << 63);
+							exp++;
+						}
+					}
+				}
+			}
+
+			if (exp > E_max) {
+				efloat_exception_flags.set(ExceptionFlag::Overflow | ExceptionFlag::Inexact);
+				bool to_inf = true;
+				switch (efloat_rounding_mode) {
+				case RoundingMode::RoundToZero:
+					to_inf = false;
+					break;
+				case RoundingMode::RoundTowardPositive:
+					if (_sign) to_inf = false;
+					break;
+				case RoundingMode::RoundTowardNegative:
+					if (!_sign) to_inf = false;
+					break;
+				default:
+					break;
+				}
+				if (to_inf) {
+					return (_sign ? -std::numeric_limits<float>::infinity() : +std::numeric_limits<float>::infinity());
+				} else {
+					return (_sign ? -std::numeric_limits<float>::max() : +std::numeric_limits<float>::max());
+				}
+			}
+
+			uint32_t sign_bit = (_sign ? 1u : 0u);
+			uint32_t exp_field = 0;
+			uint32_t frac_field = 0;
+
+			if (sig == 0) {
+				exp_field = 0;
+				frac_field = 0;
+			} else if (is_subnormal) {
+				exp_field = 0;
+				frac_field = static_cast<uint32_t>((sig >> eff_shift) & ((1ULL << F_bits) - 1));
+			} else {
+				exp_field = static_cast<uint32_t>(exp + E_bias);
+				frac_field = static_cast<uint32_t>((sig >> shift_amt) & ((1ULL << F_bits) - 1));
+			}
+
+			uint32_t bits = (sign_bit << (E_bits + F_bits)) | (exp_field << F_bits) | frac_field;
+			return sw::bit_cast<float>(bits);
+
+		} else if constexpr (std::is_same_v<Real, double>) {
+			constexpr unsigned S_bits = 1;
+			constexpr unsigned F_bits = 52;
+			constexpr unsigned E_bits = 11;
+			constexpr int E_max = 1023;
+			constexpr int E_min = -1022;
+			constexpr int E_bias = 1023;
+			constexpr unsigned K = F_bits + 1; // 53
+			constexpr unsigned shift_amt = 64 - K; // 11
+
+			uint64_t raw_sig = 0;
+			if (_limb.size() >= 1) {
+				raw_sig |= (uint64_t(_limb[0]) << 32);
+			}
+			if (_limb.size() >= 2) {
+				raw_sig |= _limb[1];
+			}
+			bool sticky_limbs = false;
+			for (size_t i = 2; i < _limb.size(); ++i) {
+				if (_limb[i] != 0) {
+					sticky_limbs = true;
+					break;
+				}
+			}
+
+			int64_t exp = _exponent;
+			uint64_t sig = raw_sig;
+			unsigned eff_shift = shift_amt;
+			bool is_subnormal = (exp < E_min);
+
+			bool lsb = false;
+			bool guard = false;
+			bool sticky = false;
+
+			if (is_subnormal) {
+				int64_t sub_shift = E_min - exp;
+				if (sub_shift >= static_cast<int64_t>(K)) {
+					sig = 0;
+					eff_shift = 64;
+					sticky = sticky_limbs || (raw_sig != 0);
+					guard = false;
+					lsb = false;
+				} else {
+					eff_shift = shift_amt + static_cast<unsigned>(sub_shift);
+					lsb = (sig & (1ULL << eff_shift)) != 0;
+					guard = (sig & (1ULL << (eff_shift - 1))) != 0;
+					sticky = sticky_limbs || ((sig & ((1ULL << (eff_shift - 1)) - 1)) != 0);
+				}
+			} else {
+				lsb = (sig & (1ULL << shift_amt)) != 0;
+				guard = (sig & (1ULL << (shift_amt - 1))) != 0;
+				sticky = sticky_limbs || ((sig & ((1ULL << (shift_amt - 1)) - 1)) != 0);
+			}
+
+			if (guard || sticky) {
+				efloat_exception_flags.set(ExceptionFlag::Inexact);
+				if (is_subnormal) {
+					efloat_exception_flags.set(ExceptionFlag::Underflow);
+				}
+			}
+
+			bool round_up = false;
+			switch (efloat_rounding_mode) {
+			case RoundingMode::RoundToNearest:
+				if (guard && (sticky || lsb)) round_up = true;
+				break;
+			case RoundingMode::RoundToZero:
+				break;
+			case RoundingMode::RoundTowardPositive:
+				if (!_sign && (guard || sticky)) round_up = true;
+				break;
+			case RoundingMode::RoundTowardNegative:
+				if (_sign && (guard || sticky)) round_up = true;
+				break;
+			}
+
+			if (round_up) {
+				if (eff_shift >= 64) {
+					// Round up from full underflow to smallest subnormal
+					sig = (1ULL << 63);
+					exp = E_min;
+					is_subnormal = true;
+				} else {
+					uint64_t prev_sig = sig;
+					sig += (1ULL << eff_shift);
+					if (sig < prev_sig) {
+						if (is_subnormal) {
+							sig = (1ULL << 63);
+							exp = E_min;
+							is_subnormal = false;
+						} else {
+							sig = (1ULL << 63);
+							exp++;
+						}
+					}
+				}
+			}
+
+			if (exp > E_max) {
+				efloat_exception_flags.set(ExceptionFlag::Overflow | ExceptionFlag::Inexact);
+				bool to_inf = true;
+				switch (efloat_rounding_mode) {
+				case RoundingMode::RoundToZero:
+					to_inf = false;
+					break;
+				case RoundingMode::RoundTowardPositive:
+					if (_sign) to_inf = false;
+					break;
+				case RoundingMode::RoundTowardNegative:
+					if (!_sign) to_inf = false;
+					break;
+				default:
+					break;
+				}
+				if (to_inf) {
+					return (_sign ? -std::numeric_limits<double>::infinity() : +std::numeric_limits<double>::infinity());
+				} else {
+					return (_sign ? -std::numeric_limits<double>::max() : +std::numeric_limits<double>::max());
+				}
+			}
+
+			uint64_t sign_bit = (_sign ? 1ULL : 0ULL);
+			uint64_t exp_field = 0;
+			uint64_t frac_field = 0;
+
+			if (sig == 0) {
+				exp_field = 0;
+				frac_field = 0;
+			} else if (is_subnormal) {
+				exp_field = 0;
+				frac_field = (sig >> eff_shift) & ((1ULL << F_bits) - 1);
+			} else {
+				exp_field = static_cast<uint64_t>(exp + E_bias);
+				frac_field = (sig >> shift_amt) & ((1ULL << F_bits) - 1);
+			}
+
+			uint64_t bits = (sign_bit << (E_bits + F_bits)) | (exp_field << F_bits) | frac_field;
+			return sw::bit_cast<double>(bits);
+
+		} else {
+			return static_cast<Real>(convert_to_ieee754<double>());
+		}
 	}
 
 private:
@@ -390,14 +1292,59 @@ private:
 	// find the most significant bit set
 	template<unsigned nnlimbs>
 	friend signed findMsb(const efloat<nnlimbs>& v);
-};
 
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////    efloat functions   /////////////////////////////////
+	// mathematical truncation friend functions
+	template<unsigned nnlimbs>
+	friend constexpr efloat<nnlimbs> trunc(const efloat<nnlimbs>& x);
+	template<unsigned nnlimbs>
+	friend constexpr efloat<nnlimbs> floor(const efloat<nnlimbs>& x);
+	template<unsigned nnlimbs>
+	friend constexpr efloat<nnlimbs> ceil(const efloat<nnlimbs>& x);
+	template<unsigned nnlimbs>
+	friend constexpr efloat<nnlimbs> round(const efloat<nnlimbs>& x);
+	template<unsigned nnlimbs>
+	friend constexpr efloat<nnlimbs> rint(const efloat<nnlimbs>& x);
+	};
 
+	// to_binary formatter for efloat to support test reporters
+	template<unsigned nlimbs>
+	inline std::string to_binary(const efloat<nlimbs>& number, bool nibbleMarker = false) {
+		std::stringstream ss;
+		if (number.isnan()) {
+			ss << "nan";
+		} else if (number.isinf()) {
+			ss << (number.sign() == -1 ? "-inf" : "+inf");
+		} else if (number.iszero()) {
+			ss << "0b0.0.0";
+		} else {
+			ss << "0b" << (number.sign() == -1 ? "1" : "0") << "."
+			   << number.scale() << ".";
+			auto limbs = number.bits();
+			for (int i = limbs.size() - 1; i >= 0; --i) {
+				ss << std::setw(8) << std::setfill('0') << std::hex << limbs[i];
+				if (i > 0) ss << "'";
+			}
+		}
+		return ss.str();
+	}
+
+	////////////////////////////////////////////////////////////////////////////////
+	////////////////////////    efloat functions   /////////////////////////////////
+
+// abs(a): absolute value. Clears the sign on a copy, which is correct for
+// every state: a negative normal becomes positive, -inf becomes +inf, -0
+// becomes +0, and a NaN stays a NaN (its sign is irrelevant to isnan()).
 template<unsigned nlimbs>
 inline efloat<nlimbs> abs(const efloat<nlimbs>& a) {
-	return a; // (a < 0 ? -a : a);
+	efloat<nlimbs> result(a);
+	result.setsign(false);
+	return result;
+}
+
+// fabs(a): floating-point absolute value (C <cmath> spelling); same as abs.
+template<unsigned nlimbs>
+inline efloat<nlimbs> fabs(const efloat<nlimbs>& a) {
+	return abs(a);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -408,12 +1355,16 @@ inline efloat<nlimbs> abs(const efloat<nlimbs>& a) {
 //   - "nan", "inf", "infinity" (case-insensitive, optional sign)
 //   - decimal / scientific literals routed through decimal_to_binary::convert
 //     ("1.5", "-3.14e2", "1e-100", "0x" is not accepted)
-// The d2b target_mantissa_bits is sized to fill efloat's available limb
-// storage, capped at 2040 bits (just under the d2b BigBits budget of 2048).
-// For larger nlimbs the parsed value uses 2040 explicit bits of precision
-// and lower limbs stay zero -- that is exact for any practical literal a
-// user types (a decimal exponent within ~+/-600).
-template<unsigned nlimbs>
+//
+// The d2b target precision is bounded by the working budget BigBits (default
+// decimal_to_binary::default_big_bits): convert<BigBits>'s reduction shifts the
+// digit-integer left by ~(target + 3*neg_E) bits, which must fit in BigBits, so
+// target is sized overflow-safely below that (a request beyond the ceiling is
+// correctly rounded to the ceiling rather than returning garbage -- issue
+// #1141). To parse to very high precision (e.g. a 1000-digit constant), pass a
+// larger budget: parse<16384>(text, value). The default (2048) comfortably
+// covers any literal a user types at ordinary precision.
+template<unsigned BigBits, unsigned nlimbs>
 bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	value.clear();
 
@@ -449,12 +1400,53 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	}
 
 	// Decimal / scientific literal.
-	constexpr unsigned cap_bits  = sw::universal::decimal_to_binary::default_big_bits - 8u;
-	constexpr unsigned want_bits = static_cast<unsigned>(nlimbs) * 32u;
-	constexpr unsigned target_bits = (want_bits == 0u) ? 1u
-	                              : ((want_bits < cap_bits) ? want_bits : cap_bits);
+	//
+	// convert<BigBits>'s intermediate must fit in BigBits, and it grows two ways
+	// depending on the effective base-10 exponent E (= exp10 - #fractional-digits):
+	//   - E < 0 (sub-unit places): left-shifts the digit-integer by roughly
+	//     (target_bits + 3*neg_E) bits, so target cannot approach BigBits.
+	//   - E > 0 (large magnitude): multiplies by 5^E, growing the digit-integer
+	//     by ~E*log2(5) < 3*E bits, independent of target.
+	// Both are bounded by ~3 bits per "decimal place away from the unit". If even
+	// the digit-integer plus that growth cannot fit in BigBits, the literal is too
+	// large/small for this budget and we report failure (rather than returning the
+	// garbage a silent overflow would produce -- issue #1141). Otherwise target is
+	// sized to leave headroom; a request beyond the safe ceiling is correctly
+	// rounded to that ceiling. Callers needing more precision or a wider magnitude
+	// pass a larger BigBits, e.g. parse<16384>(...).
+	auto scan = sw::universal::string_parse::scan_decimal_float(s);
+	if (!scan.valid) return false;
 
-	auto r = sw::universal::decimal_to_binary::convert(s, target_bits);
+	const std::int64_t  E        = static_cast<std::int64_t>(scan.exp10)
+	                             - static_cast<std::int64_t>(scan.frac_part.size());
+	const std::uint64_t neg_E    = (E < 0) ? static_cast<std::uint64_t>(-E) : 0ull;
+	const std::uint64_t pos_E    = (E > 0) ? static_cast<std::uint64_t>( E) : 0ull;
+	const std::uint64_t mag      = (neg_E > pos_E) ? neg_E : pos_E;        // one is 0
+	const std::uint64_t sig      = scan.int_part.size() + scan.frac_part.size();
+	const std::uint64_t sig_bits = sig * 34ull / 10ull + 8ull;            // ~3.33 bits/digit + guard
+
+	// If the digit-integer plus its 5^|E| growth cannot fit, this budget is too
+	// small for the literal's magnitude -- fail rather than overflow to garbage.
+	if (sig_bits + 3ull * mag + 64ull > BigBits) return false;
+
+	// Overflow-safe target. For E<0 the shift is target-relative, so cap target
+	// below BigBits - (3*neg_E + sig_bits). For E>=0 the growth is target-
+	// independent (already checked to fit), so target may go up to BigBits - 64.
+	unsigned safe_ceiling;
+	if (E < 0) {
+		const std::uint64_t overhead = 3ull * neg_E + sig_bits + 64ull;
+		safe_ceiling = (BigBits > overhead) ? static_cast<unsigned>(BigBits - overhead) : 1u;
+	}
+	else {
+		safe_ceiling = (BigBits > 64u) ? (BigBits - 64u) : 1u;
+	}
+
+	unsigned want_bits   = value.get_precision();
+	unsigned target_bits = (want_bits == 0u) ? 1u
+	                     : (want_bits < safe_ceiling ? want_bits : safe_ceiling);
+	if (target_bits == 0u) target_bits = 1u;
+
+	auto r = sw::universal::decimal_to_binary::convert<BigBits>(scan, target_bits);
 	if (!r.valid) return false;
 
 	if (r.is_zero) {
@@ -470,7 +1462,7 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 	std::int64_t binary_scale = r.binary_scale;
 	bool round_up = r.guard_bit && (r.sticky_bit || mantissa.at(0));
 	if (round_up) {
-		using Big = sw::universal::decimal_to_binary::big_integer<>;
+		using Big = sw::universal::decimal_to_binary::big_integer<BigBits>;
 		mantissa += Big(1);
 		if (mantissa.at(target_bits)) {
 			mantissa >>= 1;
@@ -510,31 +1502,26 @@ bool parse(const std::string& txt, efloat<nlimbs>& value) {
 }
 
 // generate an efloat format ASCII format
+// forward reference: full decimal formatter, defined after the arithmetic
+// operators it relies on (see below).
+template<unsigned nlimbs>
+std::string to_string(const efloat<nlimbs>& value, std::streamsize precision, std::streamsize width,
+                      bool fixed, bool scientific, bool internal, bool left, bool showpos,
+                      bool uppercase, char fill);
+
 template<unsigned nlimbs>
 inline std::ostream& operator<<(std::ostream& ostr, const efloat<nlimbs>& rhs) {
-	// to make certain that setw and left/right operators work properly
-	// we need to transform the efloat into a string
-	std::stringstream ss;
-
-	if (rhs.isinf()) {
-		ss << (rhs.sign() == -1 ? "-inf" : "+inf");
-	}
-	else if (rhs.isqnan()) {
-		ss << "nan(qnan)";
-	}
-	else if (rhs.issnan()) {
-		ss << "nan(snan)";
-	}
-	else {
-		std::streamsize prec = ostr.precision();
-		std::streamsize width = ostr.width();
-		std::ios_base::fmtflags ff;
-		ff = ostr.flags();
-		ss.flags(ff);
-		ss << std::setw(width) << std::setprecision(prec) << "TBD";
-	}
-
-	return ostr << ss.str();
+	std::ios_base::fmtflags fmt = ostr.flags();
+	std::streamsize precision   = ostr.precision();
+	std::streamsize width       = ostr.width();
+	char fillChar               = ostr.fill();
+	bool showpos    = (fmt & std::ios_base::showpos)    != 0;
+	bool uppercase  = (fmt & std::ios_base::uppercase)  != 0;
+	bool fixed      = (fmt & std::ios_base::fixed)      != 0;
+	bool scientific = (fmt & std::ios_base::scientific) != 0;
+	bool internal   = (fmt & std::ios_base::internal)   != 0;
+	bool left       = (fmt & std::ios_base::left)       != 0;
+	return ostr << to_string(rhs, precision, width, fixed, scientific, internal, left, showpos, uppercase, fillChar);
 }
 
 // read an ASCII efloat format
@@ -559,18 +1546,76 @@ inline std::istream& operator>>(std::istream& istr, efloat<nlimbs>& p) {
 // efloat - efloat binary logic operators
 
 // equal: precondition is that the storage is properly nulled in all arithmetic paths
-// (currently stubs; constexpr-marked so the surface is usable in static_assert)
 template<unsigned nlimbs>
-constexpr bool operator==(const efloat<nlimbs>& /* lhs */, const efloat<nlimbs>& /* rhs */) noexcept {
-	return true;
+constexpr bool operator==(const efloat<nlimbs>& lhs, const efloat<nlimbs>& rhs) noexcept {
+	// handle special cases
+	if (lhs.isnan() || rhs.isnan()) {
+		return false; // NaN != NaN per IEEE 754
+	}
+	if (lhs.isinf()) {
+		return rhs.isinf() && (lhs.sign() == rhs.sign());
+	}
+	if (rhs.isinf()) {
+		return false;
+	}
+	if (lhs.iszero()) {
+		return rhs.iszero(); // positive zero == negative zero
+	}
+	if (rhs.iszero()) {
+		return false;
+	}
+
+	// normal numbers
+	if (lhs.sign() != rhs.sign()) return false;
+	if (lhs.scale() != rhs.scale()) return false;
+	if (lhs.bits().size() != rhs.bits().size()) return false;
+
+	return efloat<nlimbs>::compare_limbs(lhs.bits(), rhs.bits()) == 0;
 }
 template<unsigned nlimbs>
 constexpr bool operator!=(const efloat<nlimbs>& lhs, const efloat<nlimbs>& rhs) noexcept {
 	return !operator==(lhs, rhs);
 }
 template<unsigned nlimbs>
-constexpr bool operator< (const efloat<nlimbs>& /* lhs */, const efloat<nlimbs>& /* rhs */) noexcept {
-	return false; // lhs and rhs are the same
+constexpr bool operator< (const efloat<nlimbs>& lhs, const efloat<nlimbs>& rhs) noexcept {
+	if (lhs.isnan() || rhs.isnan()) return false;
+	if (lhs.iszero() && rhs.iszero()) return false;
+	if (lhs.iszero()) {
+		return rhs.sign() != -1;
+	}
+	if (rhs.iszero()) {
+		return lhs.sign() == -1;
+	}
+
+	int lhs_sign = lhs.sign();
+	int rhs_sign = rhs.sign();
+	if (lhs_sign != rhs_sign) {
+		return lhs_sign == -1;
+	}
+
+	// Signs are equal. Compare absolute magnitudes.
+	int abs_cmp = 0;
+	if (lhs.isinf()) {
+		if (rhs.isinf()) abs_cmp = 0;
+		else abs_cmp = 1;
+	} else if (rhs.isinf()) {
+		abs_cmp = -1;
+	} else {
+		if (lhs.scale() < rhs.scale()) {
+			abs_cmp = -1;
+		} else if (lhs.scale() > rhs.scale()) {
+			abs_cmp = 1;
+		} else {
+			// exponents are equal, compare limbs
+			abs_cmp = efloat<nlimbs>::compare_limbs(lhs.bits(), rhs.bits());
+		}
+	}
+
+	if (lhs_sign == -1) {
+		return abs_cmp > 0; // for negative, larger absolute magnitude is smaller
+	} else {
+		return abs_cmp < 0; // for positive, smaller absolute magnitude is smaller
+	}
 }
 template<unsigned nlimbs>
 constexpr bool operator> (const efloat<nlimbs>& lhs, const efloat<nlimbs>& rhs) noexcept {
@@ -720,6 +1765,193 @@ inline efloat<nlimbs> operator*(double lhs, const efloat<nlimbs>& rhs) {
 template<unsigned nlimbs>
 inline efloat<nlimbs> operator/(double lhs, const efloat<nlimbs>& rhs) {
 	return operator/(efloat<nlimbs>(lhs), rhs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// decimal formatting (binary -> decimal string at arbitrary precision)
+///
+/// Ported from ereal's to_string/to_digits: digits are extracted one at a time
+/// using efloat's OWN arithmetic (scale to [1,10) via *10 / /10, then repeatedly
+/// take floor and multiply by 10). Accuracy is limited by the operand's working
+/// precision. (issue #1150)
+
+namespace efloat_detail {
+
+	// append a signed decimal exponent, minimum 2 digits (efloat's exponent range
+	// far exceeds double's, so 4+ digit exponents are reachable -- e.g. 1e1000).
+	inline void append_exponent(std::string& str, int e) {
+		str += (e < 0 ? '-' : '+');
+		std::string digits = std::to_string((e < 0) ? -e : e);
+		if (digits.size() < 2) digits.insert(0, 2u - digits.size(), '0');
+		str += digits;
+	}
+
+	// round the digit string in place, propagating a carry; bump *decimalPoint on overflow
+	inline void round_string(std::vector<char>& s, int precision, int* decimalPoint) {
+		int lastDigit = precision - 1;
+		if (s[static_cast<unsigned>(lastDigit)] >= '5') {
+			int i = precision - 2;
+			s[static_cast<unsigned>(i)]++;
+			while (i > 0 && s[static_cast<unsigned>(i)] > '9') {
+				s[static_cast<unsigned>(i)] -= 10;
+				s[static_cast<unsigned>(--i)]++;
+			}
+		}
+		if (s[0] > '9') {
+			for (int i = precision - 1; i >= 2; --i) s[static_cast<unsigned>(i)] = s[static_cast<unsigned>(i - 1)];
+			s[0u] = '1';
+			s[1u] = '0';
+			(*decimalPoint)++;
+		}
+	}
+
+	// generate `precision`+1 decimal digits of |value| into s, with the decimal
+	// exponent returned in `exponent` (value ~= 0.s[0]s[1]... * 10^(exponent+1),
+	// i.e. s[0] is the leading significant digit at 10^exponent).
+	template<unsigned nlimbs>
+	void to_digits(const efloat<nlimbs>& value, std::vector<char>& s, int& exponent, int precision) {
+		constexpr double log10_2 = 0.301029995663981;
+		if (value.iszero()) {
+			exponent = 0;
+			for (int i = 0; i < precision; ++i) s[static_cast<unsigned>(i)] = '0';
+			return;
+		}
+
+		// estimate the power-of-ten exponent from the binary scale, then correct
+		int e = static_cast<int>(log10_2 * static_cast<double>(value.scale()));
+
+		efloat<nlimbs> r(value); r.setsign(false);   // |value|
+		const efloat<nlimbs> ten(10.0), one(1.0);
+		if (e < 0)      { for (int k = 0; k < -e; ++k) r = r * ten; }
+		else if (e > 0) { for (int k = 0; k <  e; ++k) r = r / ten; }
+		if (r >= ten)     { r = r / ten; ++e; }
+		else if (r < one) { r = r * ten; --e; }
+
+		const int nrDigits = precision + 1;
+		for (int i = 0; i < nrDigits; ++i) {
+			if (r.iszero()) { for (int j = i; j < nrDigits; ++j) s[static_cast<unsigned>(j)] = '0'; break; }
+			int digit = static_cast<int>(double(r));           // r in [0,10): leading digit
+			r = r - efloat<nlimbs>(static_cast<double>(digit));
+			r = r * ten;
+			s[static_cast<unsigned>(i)] = static_cast<char>(digit + '0');
+		}
+
+		// repair any digit that fell just outside [0,9] from rounding
+		for (int i = nrDigits - 1; i > 0; --i) {
+			if (s[static_cast<unsigned>(i)] < '0')      { s[static_cast<unsigned>(i - 1)]--; s[static_cast<unsigned>(i)] += 10; }
+			else if (s[static_cast<unsigned>(i)] > '9') { s[static_cast<unsigned>(i - 1)]++; s[static_cast<unsigned>(i)] -= 10; }
+		}
+
+		// round to `precision` digits, propagate carry
+		int lastDigit = nrDigits - 1;
+		if (s[static_cast<unsigned>(lastDigit)] >= '5') {
+			int i = nrDigits - 2;
+			s[static_cast<unsigned>(i)]++;
+			while (i > 0 && s[static_cast<unsigned>(i)] > '9') {
+				s[static_cast<unsigned>(i)] -= 10;
+				s[static_cast<unsigned>(--i)]++;
+			}
+		}
+		if (s[0] > '9') {   // carry made the leading digit 10 -> shift
+			++e;
+			for (int i = precision; i >= 2; --i) s[static_cast<unsigned>(i)] = s[static_cast<unsigned>(i - 1)];
+			s[0u] = '1';
+			s[1u] = '0';
+		}
+		s[static_cast<unsigned>(precision)] = 0;
+		exponent = e;
+	}
+
+}  // namespace efloat_detail
+
+template<unsigned nlimbs>
+std::string to_string(const efloat<nlimbs>& value, std::streamsize precision, std::streamsize width,
+                      bool fixed, bool scientific, bool internal, bool left, bool showpos,
+                      bool uppercase, char fill) {
+	std::string s;
+	if (fixed && scientific) fixed = false;   // scientific takes precedence
+	if (precision < 0) precision = 6;         // default stream precision
+
+	bool negative = (value.sign() == -1);   // sign(), not isneg(): isneg() is false for -inf
+
+	if (value.isnan()) {
+		s = uppercase ? "NAN" : "nan";
+	}
+	else {
+		if (negative) s += '-'; else if (showpos) s += '+';
+
+		if (value.isinf()) {
+			s += uppercase ? "INF" : "inf";
+		}
+		else if (value.iszero()) {
+			s += '0';
+			if (precision > 0) { s += '.'; s.append(static_cast<unsigned>(precision), '0'); }
+			if (!fixed) s += (uppercase ? "E+00" : "e+00");
+		}
+		else {
+			int e               = 0;   // decimal exponent, filled in by to_digits below
+			int powerOfTenScale = static_cast<int>(std::floor(static_cast<double>(value.scale()) * 0.301029995663981));
+			int integerDigits   = (fixed ? (powerOfTenScale + 1) : 1);
+			int nrDigits        = integerDigits + static_cast<int>(precision);
+
+			int minBuffer = static_cast<int>(nlimbs) * 16;
+			int nrDigitsForFixedFormat = fixed ? std::max(minBuffer, nrDigits) : nrDigits;
+
+			double fullMagnitude = std::fabs(static_cast<double>(value));
+			if (fixed && (precision == 0) && (fullMagnitude < 1.0)) {
+				s += (fullMagnitude >= 0.5) ? '1' : '0';
+			}
+			else if (fixed && nrDigits <= 0) {
+				s += '0';
+				if (precision > 0) { s += '.'; s.append(static_cast<unsigned>(precision), '0'); }
+			}
+			else {
+				std::vector<char> t;
+				if (fixed) {
+					// compute extra guard digits (nrDigitsForFixedFormat) for accuracy,
+					// but round and print exactly nrDigits (= integerDigits + precision).
+					t.resize(static_cast<size_t>(nrDigitsForFixedFormat + 1));
+					efloat_detail::to_digits(value, t, e, nrDigitsForFixedFormat);
+					efloat_detail::round_string(t, nrDigits + 1, &integerDigits);
+					if (integerDigits > 0) {
+						int i;
+						for (i = 0; i < integerDigits; ++i) s += t[static_cast<unsigned>(i)];
+						if (precision > 0) {
+							s += '.';
+							for (int j = 0; j < static_cast<int>(precision); ++j, ++i) s += t[static_cast<unsigned>(i)];
+						}
+					}
+					else {
+						s += "0.";
+						if (integerDigits < 0) s.append(static_cast<size_t>(-integerDigits), '0');
+						for (int i = 0; i < nrDigits; ++i) s += t[static_cast<unsigned>(i)];
+					}
+				}
+				else {
+					t.resize(static_cast<size_t>(nrDigits + 1));
+					efloat_detail::to_digits(value, t, e, nrDigits);
+					s += t[0ull];
+					if (precision > 0) s += '.';
+					for (int i = 1; i <= static_cast<int>(precision); ++i) s += t[static_cast<unsigned>(i)];
+				}
+			}
+
+			if (!fixed) { s += (uppercase ? 'E' : 'e'); efloat_detail::append_exponent(s, e); }
+		}
+	}
+
+	// width / fill padding
+	size_t strLength = s.length();
+	if (width > 0 && strLength < static_cast<size_t>(width)) {
+		size_t pad = static_cast<size_t>(width) - strLength;
+		if (internal) {
+			const bool hasSign = !s.empty() && (s[0] == '-' || s[0] == '+');
+			s.insert(hasSign ? std::string::size_type(1) : std::string::size_type(0), pad, fill);
+		}
+		else if (left) s.append(pad, fill);
+		else s.insert(std::string::size_type(0), pad, fill);
+	}
+	return s;
 }
 
 }} // namespace sw::universal
