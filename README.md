@@ -443,7 +443,7 @@ citation; the BibTeX entry above is also available.
 The concept DOI [10.5281/zenodo.21456649](https://doi.org/10.5281/zenodo.21456649) always
 resolves to the latest release. To cite a specific version instead, use its version DOI:
 (v0.1.1 is [10.5281/zenodo.21456650](https://doi.org/10.5281/zenodo.21456650));
-(v0.1.2 is [10.5281/zenodo.21462151](https://doi.org/10.5281/zenodo.21456650));
+(v0.1.2 is [10.5281/zenodo.21462151](https://doi.org/10.5281/zenodo.21462151));
 (v0.1.3 is [10.5281/zenodo.21629613](https://doi.org/10.5281/zenodo.21629613)); each release
 gets its own on Zenodo.
 
