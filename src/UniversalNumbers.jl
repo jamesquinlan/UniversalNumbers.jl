@@ -176,6 +176,18 @@ for (TypeSym, P1, P2, CPrefix, StorageT) in TYPE_REGISTRY
         :($T(1.0))
     end
 
+    # typemax/typemin: top/bottom of the order, never NaN/NaR (issue #7).
+    # CFloat and DFloat encode ±Inf; Posit, LNS, HFloat, and Fixed do not, so they use floatmax.
+    # Fixed is two's complement: its most negative pattern (sign bit only) is -floatmax - ulp.
+    typemax_expr = TypeSym in (:CFloat, :DFloat) ? :($T(Inf))  : :(floatmax($T))
+    typemin_expr = if TypeSym in (:CFloat, :DFloat)
+        :($T(-Inf))
+    elseif TypeSym == :Fixed
+        :($T($StorageT(1) << ($P1 - 1), true))
+    else
+        :(-floatmax($T))
+    end
+
     if use_lut
         arith_add  = :($T(_LUT8[$CPrefix].add[Int(a.data)+1, Int(b.data)+1], true))
         arith_sub  = :($T(_LUT8[$CPrefix].sub[Int(a.data)+1, Int(b.data)+1], true))
@@ -266,12 +278,16 @@ for (TypeSym, P1, P2, CPrefix, StorageT) in TYPE_REGISTRY
         Base.eps(::Type{$T})           = $T(ccall(get_sym(Symbol($(CPrefix * "_eps"))), $(StorageT), (), ), true)
         Base.floatmin(::Type{$T})      = $T(ccall(get_sym(Symbol($(CPrefix * "_min"))), $(StorageT), (), ), true)
         Base.floatmax(::Type{$T})      = $T(ccall(get_sym(Symbol($(CPrefix * "_max"))), $(StorageT), (), ), true)
+        Base.typemax(::Type{$T})       = $typemax_expr
+        Base.typemin(::Type{$T})       = $typemin_expr
 
         @inline Base.zero(::Type{$TU}) = zero($T)
         @inline Base.one(::Type{$TU})  = one($T)
         Base.eps(::Type{$TU})          = eps($T)
         Base.floatmin(::Type{$TU})     = floatmin($T)
         Base.floatmax(::Type{$TU})     = floatmax($T)
+        Base.typemax(::Type{$TU})      = typemax($T)
+        Base.typemin(::Type{$TU})      = typemin($T)
 
         # Map UnionAll (Posit{32,2}) and concrete (Posit{32,2,UInt32}) to concrete.
         _concretetype(::Type{$T})  = $T
@@ -355,6 +371,10 @@ for (N, CPrefix, StorageT) in TAKUM_REGISTRY
     T  = :(Takum{$N, $StorageT})   # concrete type
     TU = :(Takum{$N})              # user-facing UnionAll
     use_lut = (StorageT == UInt8)
+
+    # No Inf encoding (NaR only), so the order is bounded by ±floatmax (issue #7).
+    typemax_expr = :(floatmax($T))
+    typemin_expr = :(-floatmax($T))
 
     if use_lut
         arith_add  = :($T(_LUT8[$CPrefix].add[Int(a.data)+1, Int(b.data)+1], true))
@@ -446,12 +466,16 @@ for (N, CPrefix, StorageT) in TAKUM_REGISTRY
         Base.eps(::Type{$T})           = $T(ccall(get_sym(Symbol($(CPrefix * "_eps"))), $(StorageT), (), ), true)
         Base.floatmin(::Type{$T})      = $T(ccall(get_sym(Symbol($(CPrefix * "_min"))), $(StorageT), (), ), true)
         Base.floatmax(::Type{$T})      = $T(ccall(get_sym(Symbol($(CPrefix * "_max"))), $(StorageT), (), ), true)
+        Base.typemax(::Type{$T})       = $typemax_expr
+        Base.typemin(::Type{$T})       = $typemin_expr
 
         @inline Base.zero(::Type{$TU}) = zero($T)
         @inline Base.one(::Type{$TU})  = one($T)
         Base.eps(::Type{$TU})          = eps($T)
         Base.floatmin(::Type{$TU})     = floatmin($T)
         Base.floatmax(::Type{$TU})     = floatmax($T)
+        Base.typemax(::Type{$TU})      = typemax($T)
+        Base.typemin(::Type{$TU})      = typemin($T)
 
         # Map UnionAll (Posit{32,2}) and concrete (Posit{32,2,UInt32}) to concrete.
         _concretetype(::Type{$T})  = $T
@@ -582,6 +606,8 @@ let CPrefix = "bfloat16"
         Base.eps(::Type{BF16})          = BF16(ccall(get_sym(Symbol($(CPrefix * "_eps"))), UInt16, (), ), true)
         Base.floatmin(::Type{BF16})     = BF16(ccall(get_sym(Symbol($(CPrefix * "_min"))), UInt16, (), ), true)
         Base.floatmax(::Type{BF16})     = BF16(ccall(get_sym(Symbol($(CPrefix * "_max"))), UInt16, (), ), true)
+        Base.typemax(::Type{BF16})      = BF16(0x7F80, true)   # +Inf, as Float32 (issue #7)
+        Base.typemin(::Type{BF16})      = BF16(0xFF80, true)   # -Inf
 
         Base.conj(x::BF16) = x
         Base.real(x::BF16) = x
@@ -678,6 +704,8 @@ let CPrefix = "dd"
         Base.eps(::Type{DD})          = DD(ccall(get_sym(Symbol($(CPrefix * "_eps"))), UInt128, (), ), true)
         Base.floatmin(::Type{DD})     = DD(ccall(get_sym(Symbol($(CPrefix * "_min"))), UInt128, (), ), true)
         Base.floatmax(::Type{DD})     = DD(ccall(get_sym(Symbol($(CPrefix * "_max"))), UInt128, (), ), true)
+        Base.typemax(::Type{DD})      = DD(Inf)    # issue #7
+        Base.typemin(::Type{DD})      = DD(-Inf)
 
         Base.conj(x::DD) = x
         Base.real(x::DD) = x

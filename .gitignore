@@ -6,7 +6,7 @@ build/
 
 # Julia
 Manifest.toml
-*.jl.cov
+*.cov
 *.jl.mem
 .julia/
 
